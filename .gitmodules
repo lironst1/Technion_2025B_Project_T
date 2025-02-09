@@ -1,0 +1,3 @@
+[submodule "liron_utils"]
+	path = liron_utils
+	url = https://github.com/lironst1/liron_utils.git
