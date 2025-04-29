@@ -1,9 +1,11 @@
+import os.path
+
 import numpy as np
-from sympy.stats import Probability
+import matplotlib.pyplot as plt
 
 from liron_utils import graphics as gr
 
-from __cfg__ import logger
+from __cfg__ import logger, set_props_kw_image
 from utils import *
 
 # select_random_images(
@@ -23,11 +25,29 @@ from utils import *
 # for idx, arr in enumerate(outputs):
 # 	print(f"Image {idx}: shape {arr.shape}, dtype {arr.dtype}")
 
-images, probs = load_processed_data(dir_images=r"C:\Users\liron\Downloads\Data\test")
+images, probs, filenames = load_processed_data(path_images=r"C:\Users\liron\Downloads\Data\test")
 # todo: create data manager class (only load images and probs when needed)
 
-Ax = gr.Axes(shape=(1, 3))
-plot_predictions(Ax.axs.flatten(), im=images[0], prob=probs[0])
-Ax.set_props(ax_title=["Image", "Probabilities", "Predictions"], grid=False, tick_labels=False)
+for i in tqdm(range(len(filenames))):
+	filename = filenames[i]
+	save_file_name = os.path.join(os.path.split(filename)[0], "figs",
+			os.path.splitext(os.path.basename(filename))[0] + ".png")
+	if os.path.exists(save_file_name):
+		logger.info(f"i={i}: File {save_file_name} already exists, skipping.")
+		continue
+
+	image = images[i]
+	prob = probs[i]
+
+	Ax = gr.Axes(shape=(2, 2))
+	plot_predictions([Ax.axs[0, 0], Ax.axs[1, 0], Ax.axs[1, 1]], im=image, prob=prob)
+	plot_predictions(Ax.axs[0, 1], im=image, prob=prob)
+	Ax.set_props(
+			sup_title=os.path.splitext(os.path.basename(filename))[0],
+			ax_title=["Image", "Probabilities", "Image + Probabilities", "Predictions"],
+			save_file_name=save_file_name,
+			show_fig=False,
+			**set_props_kw_image)
+	plt.close(Ax.fig)
 
 pass

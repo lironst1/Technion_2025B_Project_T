@@ -21,6 +21,7 @@ from liron_utils import graphics as gr
 from __cfg__ import logger
 
 IMAGE_EXTENSIONS = ['.jpg', '.jpeg', '.png', '.bmp', '.gif', '.tif', '.tiff']
+PROBS_EXTENSION = '.npy'
 
 CMAP = dict_(
 		rgb=ListedColormap([
@@ -279,47 +280,56 @@ def imread(filename):
 	return image
 
 
-def load_processed_data(dir_images, dir_probs=None, file_extension="npy"):
+def load_processed_data(path_images, path_probs=None, probs_ext=PROBS_EXTENSION):
 	"""
 	Load all images and probabilities from a folder into a list.
 
 	Parameters
 	----------
-	dir_images :              str
-		Path to image folder. Probabilities are assumed to be in os.path.join(dir_images, "output").
-	dir_probs :               str, optional
-		Path to the folder containing the probabilities. If not specified, os.path.join(dir_images, "output") is used.
-	file_extension :        str, optional
+	path_images :           str or list[str]
+		Path to images/folder containing images
+	path_probs :            str or list[str], optional
+		Path to files/folder containing probability files. If not specified, will try os.path.join(dir_images, "output")
+	probs_ext :             str, optional
 		Extension of saved files. Default is "npy"
 
 	Returns
 	-------
 		list of np.ndarray
 	"""
-	if dir_probs is None:
-		dir_probs = os.path.join(dir_images, "output")
+	if isinstance(path_images, str):
+		if os.path.isdir(path_images):
+			filenames_images = sorted([f for f in os.listdir(path_images)
+				if os.path.splitext(f)[1].lower() in IMAGE_EXTENSIONS])
+		else:
+			filenames_images = [path_images]
+	else:  # list of filenames
+		filenames_images = path_images
 
-	filenames_images = sorted([f for f in os.listdir(dir_images) if os.path.splitext(f)[1].lower() in IMAGE_EXTENSIONS])
+	if path_probs is None:
+		path_probs = os.path.join(path_images, "output")
+
 	if not filenames_images:
-		raise ValueError(f"No images found in {dir_images}.")
+		raise ValueError(f"No images found in {path_images}.")
 
-	filenames_probs = sorted(glob(os.path.join(dir_images, "output", f"*.{file_extension}")))
+	filenames_probs = sorted(glob(os.path.join(path_images, "output", f"*{probs_ext}")))
 	if not filenames_probs:
-		raise ValueError(f"No probabilities found in {dir_probs}.")
+		raise ValueError(f"No probabilities found in {path_probs}.")
 
 	if len(filenames_images) != len(filenames_probs):
 		raise ValueError(
 				f"Inconsistent number of images ({len(filenames_images)}) and probabilities ({len(filenames_probs)})")
+	filenames_images = [os.path.join(path_images, f) for f in filenames_images]
 
 	# Load images
-	images = np.array([imread(os.path.join(dir_images, f)) for f in filenames_images])
+	images = np.array([imread(os.path.join(path_images, f)) for f in filenames_images])
 
 	# Load processed files
 	probs = np.array([np.load(f) for f in filenames_probs])
 
 	logger.info(f"Loaded {len(filenames_images)} images and probabilities.")
 
-	return images, probs
+	return images, probs, filenames_images
 
 
 def plot_predictions(axs, im=None, prob=None, kind="probabilities", **kwargs):
@@ -349,20 +359,25 @@ def plot_predictions(axs, im=None, prob=None, kind="probabilities", **kwargs):
 	"""
 	if type(kind) is str:
 		kind = [kind]
-	if isinstance(axs, Axes):
-		axs = [axs]
-	elif len(axs) == 3:
-		kind = ["probabilities", "predictions"]
 	if im is None and prob is None:
 		raise ValueError("Either 'im' or 'prob' must be provided.")
-
+	if isinstance(axs, Axes):
+		axs = [axs]
+	elif isinstance(axs, gr.Axes):
+		axs = axs.axs.flatten()
 	cmap = CMAP.rgb
+	if len(axs) == 1:
+		axs = [axs[0], axs[0], axs[0]]  # axs[0] is used for both im and prob/predictions
+		cmap = CMAP.rgba
+	elif len(axs) == 2:
+		axs = [axs[0], axs[1], axs[1]]  # axs[1] is used for either prob/predictions
+	elif len(axs) == 3:
+		axs = [axs[0], axs[1], axs[2]]
+		kind = ["probabilities", "predictions"]
 
 	if im is not None:
 		im = np.array(im)
 		axs[0].imshow(im, cmap="gray")
-		if len(axs) == 1:
-			cmap = CMAP.rgba
 
 	if prob is not None:
 		prob = np.array(prob)
@@ -376,3 +391,69 @@ def plot_predictions(axs, im=None, prob=None, kind="probabilities", **kwargs):
 		if "predictions" in kind:
 			X = prob.argmax(axis=-1)
 			axs[2].imshow(X, **kwargs)
+
+
+class DataManager:
+	def __init__(self, dir_images, dir_data, sample_size=None, max_in_memory=5):
+		self.dir_images = dir_images
+		self.dir_data = dir_data
+		self.max_in_memory = max_in_memory
+
+		# Discover image files
+		self.filenames_images = sorted(
+				[f for f in os.listdir(dir_images) if os.path.splitext(f)[1].lower() in IMAGE_EXTENSIONS])
+
+		# Random sampling
+		if sample_size is not None:
+			self.filenames_images = random.sample(self.filenames_images, min(sample_size, len(self.filenames_images)))
+
+		self.num_samples = len(self.filenames_images)
+
+		# Cache (filename -> image)
+		self.image_cache = dict()
+		self.cache_order = []
+
+		# Load all associated data
+		self.data = dict()
+		for f in self.filenames_images:
+			base_name = os.path.splitext(f)[0]
+			data_path = os.path.join(dir_data, base_name + PROBS_EXTENSION)
+			if os.path.exists(data_path):
+				self.data[base_name] = np.load(data_path)
+			else:
+				self.data[base_name] = None
+
+	def __len__(self):
+		return self.num_samples
+
+	def __getitem__(self, idx):
+		if idx < 0 or idx >= self.num_samples:
+			raise IndexError(f"Index {idx} out of range (0-{self.num_samples - 1})")
+
+		filename = self.filenames_images[idx]
+		base_name = os.path.splitext(filename)[0]
+
+		if filename in self.image_cache:
+			image = self.image_cache[filename]
+		else:
+			# Load the image
+			image_path = os.path.join(self.dir_images, filename)
+			image = self.imread(image_path)
+			self._add_to_cache(filename, image)
+
+		associated_data = self.data.get(base_name, None)
+		return image, associated_data
+
+	def _add_to_cache(self, filename, image):
+		if len(self.image_cache) >= self.max_in_memory:
+			# Remove the oldest loaded image
+			oldest = self.cache_order.pop(0)
+			del self.image_cache[oldest]
+		self.image_cache[filename] = image
+		self.cache_order.append(filename)
+
+	@staticmethod
+	def imread(filename):
+		image = plt.imread(filename)
+		image = skimage.exposure.equalize_adapthist(image, clip_limit=0.025)
+		return image
