@@ -2,39 +2,23 @@ import os
 import random
 import shutil
 from glob import glob
+import threading
 from multiprocessing import Pool
 import subprocess
 import numpy as np
 import tempfile
-import h5py
 from tqdm import tqdm
+import h5py
 import tifffile
-from matplotlib.colors import ListedColormap
+import skimage
 from matplotlib.axes import Axes
 import matplotlib.pyplot as plt
-import skimage
 
 from liron_utils.pure_python import NUM_CPUS, parallel_map, parallel_threading, dict_
 from liron_utils.signal_processing import rescale
 from liron_utils import graphics as gr
 
-from __cfg__ import logger
-
-IMAGE_EXTENSIONS = ['.jpg', '.jpeg', '.png', '.bmp', '.gif', '.tif', '.tiff']
-PROBS_EXTENSION = '.npy'
-
-CMAP = dict_(
-		rgb=ListedColormap([
-			gr.hex2rgb(gr.COLORS.YELLOW),  # nuclei
-			gr.hex2rgb(gr.COLORS.BLUE),  # background
-			gr.hex2rgb(gr.COLORS.RED),  # dirt
-		]),
-		rgba=ListedColormap([
-			gr.hex2rgb(gr.COLORS.YELLOW) + (0.25,),  # nuclei
-			gr.hex2rgb(gr.COLORS.BLUE) + (0.2,),  # background
-			gr.hex2rgb(gr.COLORS.RED) + (0.15,),  # dirt
-		]),
-)
+from __cfg__ import set_props_kw_image, IMAGE_EXTENSIONS, PROBS_EXTENSION, CMAP, logger, EQUALIZE_ADAPTHIST_KW
 
 
 def move_and_rename_files(dir_root, dir_target=None):
@@ -332,128 +316,273 @@ def load_processed_data(path_images, path_probs=None, probs_ext=PROBS_EXTENSION)
 	return images, probs, filenames_images
 
 
-def plot_predictions(axs, im=None, prob=None, kind="probabilities", **kwargs):
-	"""
-	Plot predictions.
+class Queue:
+	def __init__(self, max_size=0):
+		"""Thread-safe queue with a maximum size.
+		If the queue is full, the oldest item is removed when a new item is added."""
+		self.maxsize = max_size
+		self.queue = []
+		self._lock = threading.Lock()
 
-	Parameters
-	----------
-	axs :           Axes or list[Axes]
-		Axes object to plot on. If given as a list, plots will be [image, probabilities, predictions] (or a part).
-	im :          array_like, optional
-		Image of shape (height, width).
-	prob :          array_like, optional
-		Array of shape (height, width, n_classes) containing the predicted probabilities.
-	kind :          str
-		Kind of plot to create:
-		- "probabilities": Plot the predicted probabilities.
-		- "predictions": Plot the predicted class labels.
-		If len(Ax) == 1, 'im' and 'kind' will be plotted together.
-		If len(Ax) == 2, 'im' and 'kind' will be plotted in Ax[0], Ax[1], respectively.
-		If len(Ax) == 3, this parameter is ignored.
-	**kwargs :      sent to imshow
+	def enqueue(self, name, item):
+		"""Add an item to the queue. If the queue is full, remove the oldest item."""
+		with self._lock:
+			if 0 < self.maxsize <= len(self.queue):
+				self.queue.pop(0)
+			self.queue.append((name, item))
 
-	Returns
-	-------
+	def dequeue(self):
+		"""Remove and return the oldest item from the queue. If the queue is empty, return None."""
+		with self._lock:
+			return self.queue.pop(0) if self.queue else None
 
-	"""
-	if type(kind) is str:
-		kind = [kind]
-	if im is None and prob is None:
-		raise ValueError("Either 'im' or 'prob' must be provided.")
-	if isinstance(axs, Axes):
-		axs = [axs]
-	elif isinstance(axs, gr.Axes):
-		axs = axs.axs.flatten()
-	cmap = CMAP.rgb
-	if len(axs) == 1:
-		axs = [axs[0], axs[0], axs[0]]  # axs[0] is used for both im and prob/predictions
-		cmap = CMAP.rgba
-	elif len(axs) == 2:
-		axs = [axs[0], axs[1], axs[1]]  # axs[1] is used for either prob/predictions
-	elif len(axs) == 3:
-		axs = [axs[0], axs[1], axs[2]]
-		kind = ["probabilities", "predictions"]
+	def remove(self, name):
+		"""Remove an item from the queue by its name."""
+		with self._lock:
+			for idx, (item_name, item) in enumerate(self.queue):
+				if item_name == name:
+					return self.queue.pop(idx)
+			raise ValueError(f"Name {name} not found in queue.")
 
-	if im is not None:
-		im = np.array(im)
-		axs[0].imshow(im, cmap="gray")
+	def __contains__(self, name):
+		"""Check if an item with the given name is in the queue."""
+		with self._lock:
+			return any(item_name == name for item_name, _ in self.queue)
 
-	if prob is not None:
-		prob = np.array(prob)
+	def __len__(self):
+		return len(self.queue)
 
-		kwargs = dict(cmap=cmap) | kwargs
+	def __getitem__(self, name):
+		"""Get an item from the queue by its name."""
+		with self._lock:
+			for item_name, item in self.queue:
+				if item_name == name:
+					return item
+			raise ValueError(f"Name {name} not found in queue.")
 
-		if "probabilities" in kind:
-			X = np.einsum("...i,ij->...j", prob, np.array(cmap.colors))
-			axs[1].imshow(X, **kwargs)
-
-		if "predictions" in kind:
-			X = prob.argmax(axis=-1)
-			axs[2].imshow(X, **kwargs)
+	def __repr__(self):
+		"""Return a string representation of the queue."""
+		with self._lock:
+			return f"Queue({self.queue})"
 
 
 class DataManager:
-	def __init__(self, dir_images, dir_data, sample_size=None, max_in_memory=5):
-		self.dir_images = dir_images
-		self.dir_data = dir_data
-		self.max_in_memory = max_in_memory
+	def __init__(self, dir_root, sample_size=None, n_max_in_memory=5):
+		"""
+		Data manager for loading images and associated data.
+		
+		Parameters
+		----------
+		dir_root :            str
+			Path to the directory/tree containing images.
+			Associated data is assumed to be in the same directory as each image, or in an ./output directory, e.g.:
+			└── dir_root
+		    │   ├── ABC
+		    │   │   ├── image1.png
+		    │   │   ├── ...
+		    │   │   ├── output
+		    │   │   │   ├── image1.npy
+		    │   │   │   ├── ...
+		sample_size :           int, float, or bool, optional
+			Number of images to randomly sample from the directory.
+			If given in the range (0, 1], it is interpreted as a fraction (True is the same as 1, i.e., use all data in
+			random order. False will use all data in the order discovered by os.path.walk). If None, all images are used.
+		n_max_in_memory :       int, optional
+			Maximum number of images to keep in memory at once. If exceeded, the oldest image will be removed from
+			memory. Default is 5.
+		"""
+		if not os.path.isdir(dir_root):
+			raise ValueError(f"Image directory not found: {dir_root}")
+		self.dir_root = dir_root
 
-		# Discover image files
-		self.filenames_images = sorted(
-				[f for f in os.listdir(dir_images) if os.path.splitext(f)[1].lower() in IMAGE_EXTENSIONS])
+		# Discover image and data files
+		filenames_images = []
+		for dir_cur, _, filenames in os.walk(dir_root, topdown=False):
+			for filename in filenames:
+				if os.path.splitext(filename)[1].lower() in IMAGE_EXTENSIONS:
+					rel_path = os.path.relpath(dir_cur, dir_root)
+					if rel_path == ".":
+						rel_path = ""
+					filenames_images.append(os.path.join(rel_path, filename))
 
 		# Random sampling
-		if sample_size is not None:
-			self.filenames_images = random.sample(self.filenames_images, min(sample_size, len(self.filenames_images)))
+		if sample_size is not None and sample_size is not False:
+			if sample_size is True:
+				sample_size = len(filenames_images)
+			elif 0 < sample_size <= 1:  # fraction
+				sample_size = int(sample_size * len(filenames_images))
+			elif sample_size > 1:  # integer
+				if sample_size > len(filenames_images):
+					raise ValueError(f"sample_size ({sample_size}) exceeds the "
+					                 f"number of available images ({len(filenames_images)}).")
+				if int(sample_size) != sample_size:
+					raise ValueError(f"sample_size must be a non-negative float or bool (given {sample_size} instead).")
+			else:
+				raise ValueError(f"sample_size must be a non-negative float or bool (given {sample_size} instead).")
 
-		self.num_samples = len(self.filenames_images)
+			filenames_images = random.sample(filenames_images, min(sample_size, len(filenames_images)))
 
-		# Cache (filename -> image)
-		self.image_cache = dict()
-		self.cache_order = []
+		self.num_samples = len(filenames_images)
 
 		# Load all associated data
-		self.data = dict()
-		for f in self.filenames_images:
-			base_name = os.path.splitext(f)[0]
-			data_path = os.path.join(dir_data, base_name + PROBS_EXTENSION)
-			if os.path.exists(data_path):
-				self.data[base_name] = np.load(data_path)
-			else:
-				self.data[base_name] = None
+		self.basenames = [os.path.splitext(f)[0] for f in filenames_images]
+		self.paths = dict_()
+		for idx, filename in enumerate(filenames_images):
+			basename = self.basenames[idx]
+
+			path_asoc_data = None
+			if os.path.exists(os.path.join(dir_root, basename + PROBS_EXTENSION)):
+				path_asoc_data = os.path.join(dir_root, basename + PROBS_EXTENSION)
+			elif os.path.exists(os.path.join(dir_root, os.path.dirname(basename), "output",
+					os.path.split(basename)[1] + PROBS_EXTENSION)):
+				path_asoc_data = os.path.join(dir_root, os.path.dirname(basename), "output",
+						os.path.split(basename)[1] + PROBS_EXTENSION)
+
+			self.paths[basename] = dict_(
+					path_image=os.path.join(dir_root, filename),
+					path_asoc_data=path_asoc_data,
+			)
+
+		# Cache filename -> (image, data)
+		self.cache = Queue(max_size=n_max_in_memory)
 
 	def __len__(self):
 		return self.num_samples
 
 	def __getitem__(self, idx):
+		"""Get the image and associated data for a given index."""
+		if isinstance(idx, int):
+			basename = self.basenames[idx]
+		elif isinstance(idx, str):
+			basename = idx
+		elif isinstance(idx, slice):
+			return [self[i] for i in range(self.num_samples)[idx]]
+		elif isinstance(idx, list):
+			return [self[i] for i in idx]
+		else:
+			raise TypeError(f"Index must be an integer or a string (given {type(idx)} instead).")
+
 		if idx < 0 or idx >= self.num_samples:
 			raise IndexError(f"Index {idx} out of range (0-{self.num_samples - 1})")
 
-		filename = self.filenames_images[idx]
-		base_name = os.path.splitext(filename)[0]
+		if basename in self.cache:  # Check if the image is already in memory
+			data = self.cache[basename]
+			image = data.image
+			asoc_data = data.asoc_data
 
-		if filename in self.image_cache:
-			image = self.image_cache[filename]
+		else:  # Load the image and associated data
+			image = self.imread(self.paths[basename].path_image)
+			if self.paths[basename].path_asoc_data is None:
+				asoc_data = None
+			else:
+				asoc_data = np.load(self.paths[basename].path_asoc_data)
+			data = dict_(image=image, asoc_data=asoc_data)
+			self.cache.enqueue(name=basename, item=data)
+
+		return image, asoc_data
+
+	def has_asoc_data(self, idx):
+		"""Check if the image has associated data."""
+		if isinstance(idx, int):
+			basename = self.basenames[idx]
+		elif isinstance(idx, str):
+			basename = idx
+		elif isinstance(idx, slice):
+			return [self.has_asoc_data(i) for i in range(self.num_samples)[idx]]
+		elif type(idx) in [list, tuple, np.ndarray]:
+			return [self.has_asoc_data(i) for i in idx]
 		else:
-			# Load the image
-			image_path = os.path.join(self.dir_images, filename)
-			image = self.imread(image_path)
-			self._add_to_cache(filename, image)
+			raise TypeError(f"Index must be an integer or a string (given {type(idx)} instead).")
 
-		associated_data = self.data.get(base_name, None)
-		return image, associated_data
-
-	def _add_to_cache(self, filename, image):
-		if len(self.image_cache) >= self.max_in_memory:
-			# Remove the oldest loaded image
-			oldest = self.cache_order.pop(0)
-			del self.image_cache[oldest]
-		self.image_cache[filename] = image
-		self.cache_order.append(filename)
+		return self.paths[basename].path_asoc_data is not None
 
 	@staticmethod
 	def imread(filename):
 		image = plt.imread(filename)
-		image = skimage.exposure.equalize_adapthist(image, clip_limit=0.025)
+		image = skimage.exposure.equalize_adapthist(image, **EQUALIZE_ADAPTHIST_KW)
 		return image
+
+	def plot(self, idx, axs=None, which="all", **kwargs):
+		"""
+		Plot predictions.
+
+		Parameters
+		----------
+		idx :           int
+			Index of the image to plot.
+		axs :           Axes or list[Axes]
+			Axes object to plot on. If given as a list, plots will be
+			[image, probabilities, predictions, image+probabilities] (or a part, depending on len(axs)).
+			If None, a new Axes object will be created.
+		which :         str or list[str]
+			Which plots to show:
+			- "image": Show the image.
+			- "probabilities": Show the predicted probabilities.
+			- "predictions": Show the predicted class labels.
+			- "image+probabilities": Show the image and predicted probabilities together.
+			- "all": Show all plots [image, probabilities, predictions, image+probabilities] (or a part).
+		**kwargs :      sent to imshow
+
+		Returns
+		-------
+
+		"""
+		if not isinstance(idx, int) and not isinstance(idx, str):
+			raise ValueError("Using iterable indices is not supported. Please call plot() for each index separately.")
+
+		image, asoc_data = self[idx]
+		prob = asoc_data
+
+		WHICH_VALUES = ["image", "probabilities", "predictions", "image+probabilities"]
+		if isinstance(which, str):
+			if which == "all":
+				if prob is None:
+					which = ["image"]
+				else:
+					which = WHICH_VALUES
+			else:
+				which = [which]
+		if not set(which).issubset(set(WHICH_VALUES)):
+			raise ValueError(f"Invalid value in 'which'. Allowed values are: {WHICH_VALUES} or 'all'.")
+
+		if axs is None:  # create new axes
+			shape = (1, len(which))
+			if len(which) == 4:  # len(WHICH_VALUES)
+				shape = (2, 2)
+			axs = gr.Axes(shape=shape)
+		if isinstance(axs, Axes):
+			axs = [axs]
+		elif isinstance(axs, gr.Axes):
+			axs = axs.axs.flatten()
+
+		def plot_image(ax, image, cmap="gray", **kwargs):
+			ax.imshow(image, cmap=cmap)
+
+		def plot_probabilities(ax, prob, cmap, **kwargs):
+			X = np.einsum("...i,ij->...j", prob, np.array(CMAP.rgb.colors))
+			ax.imshow(X, cmap=cmap, **kwargs)
+
+		def plot_predictions(ax, prob, cmap, **kwargs):
+			X = prob.argmax(axis=-1)
+			ax.imshow(X, cmap=cmap, **kwargs)
+
+		for i, ax in enumerate(axs):
+			if i >= len(which):
+				break
+
+			if which[i] == "image":
+				plot_image(ax, image, **kwargs)
+			else:
+				if prob is None:
+					logger.warning(f"Image {idx} has no associated data. Skipping {which[i]} plot.")
+					continue
+
+				if which[i] == "probabilities":
+					plot_probabilities(ax, prob, cmap=CMAP.rgb, **kwargs)
+				elif which[i] == "predictions":
+					plot_predictions(ax, prob, cmap=CMAP.rgb, **kwargs)
+				else:  # which[i] == "image+probabilities":
+					plot_image(ax, image, **kwargs)
+					plot_probabilities(ax, prob, cmap=CMAP.rgba, **kwargs)
+
+		return axs
