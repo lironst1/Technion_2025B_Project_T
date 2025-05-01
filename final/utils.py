@@ -456,7 +456,7 @@ class DataManager:
 		elif isinstance(idx, str):
 			basename = idx
 		elif isinstance(idx, slice):
-			return [self[i] for i in range(self.num_samples)[idx]]
+			return [self[i] for i in range(self.num_samples)[idx]]. # TODO: what happens if user asks for more images than max_size?
 		elif isinstance(idx, list):
 			return [self[i] for i in idx]
 		else:
