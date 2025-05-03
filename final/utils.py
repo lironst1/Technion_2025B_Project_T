@@ -2,7 +2,6 @@ import os
 import random
 import shutil
 from glob import glob
-import threading
 from multiprocessing import Pool
 import subprocess
 import numpy as np
@@ -14,11 +13,13 @@ import skimage
 from matplotlib.axes import Axes
 import matplotlib.pyplot as plt
 
-from liron_utils.pure_python import NUM_CPUS, parallel_map, parallel_threading, dict_
+from liron_utils.pure_python import NUM_CPUS, parallel_map, parallel_threading, dict_, NamedQueue
 from liron_utils.signal_processing import rescale
 from liron_utils import graphics as gr
 
-from __cfg__ import set_props_kw_image, IMAGE_EXTENSIONS, PROBS_EXTENSION, CMAP, logger, EQUALIZE_ADAPTHIST_KW
+from __cfg__ import PATH_ILASTIK_EXE, set_props_kw_image, IMAGE_EXTENSIONS, PROBS_EXTENSION, CMAP, \
+	logger, EQUALIZE_ADAPTHIST_KW
+import tests
 
 
 def move_and_rename_files(dir_root, dir_target=None):
@@ -152,47 +153,84 @@ def select_random_images(dir_root, dir_target=None, **kwargs):
 	logger.info("Finished copying images.")
 
 
-def run_ilastik_single_image(*args):
-	ilastik_path, project_path, input_path, save_dir, save_format = args
+def run_ilastik(path_project, dir_root, image_ext=".tif"):
+	if not os.path.exists(path_project):
+		raise ValueError(f"Project file not found at {path_project}")
+	if not os.path.isdir(dir_root):
+		raise ValueError(f"Path is not a directory: {dir_root}")
+	if " " in path_project or " " in dir_root:  # Ilastik doesn't like spaces in the path_project
+		tests.test_symlink_admin_priv()
+	if image_ext not in IMAGE_EXTENSIONS:
+		raise ValueError(f"Invalid image extension: {image_ext}. Supported extensions are: {IMAGE_EXTENSIONS}")
+
+	dir_out = os.path.join(dir_root, "output")
+	os.makedirs(dir_out, exist_ok=True)
 
 	with tempfile.TemporaryDirectory() as temp_dir:
-		output_file = os.path.join(temp_dir, "output.h5")
+		if " " in path_project:  # Ilastik doesn't like spaces in the path_project
+			tmp = path_project
+			path_project = os.path.join(temp_dir, os.path.basename(tmp))
+			os.symlink(src=tmp, dst=path_project, target_is_directory=False)
+			logger.info(f"Created symlink to {path_project}")
+
+		if " " in dir_root:
+			tmp = dir_root
+			dir_root = os.path.join(temp_dir, os.path.basename(tmp))
+			os.symlink(src=tmp, dst=dir_root, target_is_directory=True)
+			logger.info(f"Created symlink to {dir_root}")
+
+			tmp = dir_out
+			dir_out = os.path.join(temp_dir, os.path.basename(tmp))
+			os.symlink(src=tmp, dst=dir_out, target_is_directory=True)
+			logger.info(f"Created symlink to {dir_out}")
+
+		filenames_format = os.path.join(dir_root, f"*{image_ext}")
+		output_filename_format = os.path.join(dir_out, "{nickname}.npy")
 
 		command = [
-			ilastik_path,
-			f"--headless",
-			f"--project={project_path}",
-			f"--export_source=probabilities",
-			f"--output_format=hdf5",
-			f"--output_filename_format={output_file}",
-			input_path
+			PATH_ILASTIK_EXE,
+			f'--headless',
+			f'--readonly',
+			f'--input-axes=zyx',
+			# f'--stack_along="c"',
+			f'--export_source=probabilities',
+			f'--project={path_project}',
+			f'--output_format=numpy',
+			f'--output_filename_format={output_filename_format}',
+			f'{filenames_format}'
 		]
 
 		subprocess.run(command, check=True)
 
-		with h5py.File(output_file, "r") as f:
-			dataset_keys = list(f.keys())
-			data = f[dataset_keys[0]][:]
-
-	# Save output
-	base_filename = os.path.splitext(os.path.basename(input_path))[0]
-	if save_dir is not None:
-		os.makedirs(save_dir, exist_ok=True)
-		save_path = os.path.join(save_dir, f"{base_filename}.{save_format}")
-		if save_format == "npy":
-			np.save(save_path, data)
-		elif save_format == "tif":
-			tifffile.imwrite(save_path, data.astype(np.float32))  # or np.uint8 if needed
-		else:
-			raise ValueError(f"Unknown save_format: {save_format}")
-
-	return data
+		"""
+		TODO: Current error:
+		ilastik.applets.base.applet.DatasetConstraintError: Constraint of 'Pixel Classification' applet was violated: All input images must have the same dimensionality.  Your new image has 4 dimensions (including channel), but your other images have 3 dimensions.
+		ERROR 2025-05-04 01:26:14,752 log_exception 33984 23564 Project could not be loaded due to the exception shown above.
+		Aborting Project Open Action
+		"""
+		pass
 
 
-def run_ilastik_on_folder_parallel(
-		path_ilastik_exe,
+# 	with h5py.File(output_file, "r") as f:
+# 		dataset_keys = list(f.keys())
+# 		data = f[dataset_keys[0]][:]
+#
+# # Save output
+# base_filename = os.path.splitext(os.path.basename(input_path))[0]
+# if save_dir is not None:
+# 	os.makedirs(save_dir, exist_ok=True)
+# 	save_path = os.path.join(save_dir, f"{base_filename}.{save_format}")
+# 	if save_format == "npy":
+# 		np.save(save_path, data)
+# 	elif save_format == "tif":
+# 		tifffile.imwrite(save_path, data.astype(np.float32))  # or np.uint8 if needed
+# 	else:
+# 		raise ValueError(f"Unknown save_format: {save_format}")
+
+
+def run_ilastik_parallel(
 		path_project,
-		dir_root,
+		filenames,
 		dir_target=None,
 		save_format="npy"
 ):
@@ -204,170 +242,44 @@ def run_ilastik_on_folder_parallel(
 
 	Parameters
 	----------
-	path_ilastik_exe : str
-	    Path to the Ilastik's 'run_ilastik.bat' script used for headless processing.
-	path_project : str
+	path_project :      str
 	    Path to the Ilastik project file (.ilp) for loading the pre-trained model.
-	dir_root : str
-	    Path to the directory containing the images to process.
-	file_ext : str, optional
-	    File extension of image files to process (default is `"tif"`).
-	n_workers : int, optional
-	    Number of parallel processes to spawn for concurrent processing; defaults to using
-	    all available CPUs minus one.
-	dir_target : str, optional
+	filenames :         list[str]
+	    List of image filenames to be processed. If a directory is provided, all images in the directory will be processed.
+	dir_target :        str, optional
 	    Directory path for saving the output files. If not specified, results are not saved.
-	save_format : str, optional
+	save_format :       str, optional
 	    Format for saving output files, either `"npy"` or `"tif"` (default is `"npy"`).
 
 	Returns
 	-------
-	list of np.ndarray
+	list[np.ndarray]
 	    List of processed output arrays corresponding to the images in the specified folder.
 	"""
-
-	if not os.path.exists(path_ilastik_exe):
-		raise ValueError(f"Ilastik executable not found at {path_ilastik_exe}")
 	if not os.path.exists(path_project):
 		raise ValueError(f"Project file not found at {path_project}")
-	if not os.path.exists(dir_root):
-		raise ValueError(f"Data path not found at {dir_root}")
 	if save_format not in ["npy", "tif"]:
 		raise ValueError(f"Invalid save format: {save_format}. Use 'npy' or 'tif'.")
 
-	filenames = sorted([f for f in os.listdir(dir_root) if os.path.splitext(f)[1].lower() in IMAGE_EXTENSIONS])
-
-	if not filenames:
-		raise ValueError(f"No images found in {dir_root}")
-	logger.info(f"Found {len(filenames)} images. Running ilastik in parallel...")
-
-	args_list = [(path_ilastik_exe, path_project, input_path, dir_target, save_format) for input_path in filenames]
+	args_list = [(PATH_ILASTIK_EXE, path_project, f, dir_target, save_format) for f in filenames]
 
 	# outputs = parallel_threading(
-	# 		func=run_ilastik_single_image,
+	# 		func=run_ilastik,
 	# 		iterable=args_list,
 	# 		)
 	outputs = []
 	# with Pool(processes=n_workers) as pool:
-	# 	for result in tqdm(pool.imap(run_ilastik_single_image, args_list), total=len(args_list)):
+	# 	for result in tqdm(pool.imap(run_ilastik, args_list), total=len(args_list)):
 	# 		outputs.append(result)
 	for args in tqdm(args_list):
-		outputs.append(run_ilastik_single_image(*args))
+		outputs.append(run_ilastik(*args))
 
 	logger.info("Finished processing all images.")
 	return outputs
 
 
-def imread(filename):
-	image = plt.imread(filename)
-	image = skimage.exposure.equalize_adapthist(image, clip_limit=0.025)
-	return image
-
-
-def load_processed_data(path_images, path_probs=None, probs_ext=PROBS_EXTENSION):
-	"""
-	Load all images and probabilities from a folder into a list.
-
-	Parameters
-	----------
-	path_images :           str or list[str]
-		Path to images/folder containing images
-	path_probs :            str or list[str], optional
-		Path to files/folder containing probability files. If not specified, will try os.path.join(dir_images, "output")
-	probs_ext :             str, optional
-		Extension of saved files. Default is "npy"
-
-	Returns
-	-------
-		list of np.ndarray
-	"""
-	if isinstance(path_images, str):
-		if os.path.isdir(path_images):
-			filenames_images = sorted([f for f in os.listdir(path_images)
-				if os.path.splitext(f)[1].lower() in IMAGE_EXTENSIONS])
-		else:
-			filenames_images = [path_images]
-	else:  # list of filenames
-		filenames_images = path_images
-
-	if path_probs is None:
-		path_probs = os.path.join(path_images, "output")
-
-	if not filenames_images:
-		raise ValueError(f"No images found in {path_images}.")
-
-	filenames_probs = sorted(glob(os.path.join(path_images, "output", f"*{probs_ext}")))
-	if not filenames_probs:
-		raise ValueError(f"No probabilities found in {path_probs}.")
-
-	if len(filenames_images) != len(filenames_probs):
-		raise ValueError(
-				f"Inconsistent number of images ({len(filenames_images)}) and probabilities ({len(filenames_probs)})")
-	filenames_images = [os.path.join(path_images, f) for f in filenames_images]
-
-	# Load images
-	images = np.array([imread(os.path.join(path_images, f)) for f in filenames_images])
-
-	# Load processed files
-	probs = np.array([np.load(f) for f in filenames_probs])
-
-	logger.info(f"Loaded {len(filenames_images)} images and probabilities.")
-
-	return images, probs, filenames_images
-
-
-class Queue:
-	def __init__(self, max_size=0):
-		"""Thread-safe queue with a maximum size.
-		If the queue is full, the oldest item is removed when a new item is added."""
-		self.maxsize = max_size
-		self.queue = []
-		self._lock = threading.Lock()
-
-	def enqueue(self, name, item):
-		"""Add an item to the queue. If the queue is full, remove the oldest item."""
-		with self._lock:
-			if 0 < self.maxsize <= len(self.queue):
-				self.queue.pop(0)
-			self.queue.append((name, item))
-
-	def dequeue(self):
-		"""Remove and return the oldest item from the queue. If the queue is empty, return None."""
-		with self._lock:
-			return self.queue.pop(0) if self.queue else None
-
-	def remove(self, name):
-		"""Remove an item from the queue by its name."""
-		with self._lock:
-			for idx, (item_name, item) in enumerate(self.queue):
-				if item_name == name:
-					return self.queue.pop(idx)
-			raise ValueError(f"Name {name} not found in queue.")
-
-	def __contains__(self, name):
-		"""Check if an item with the given name is in the queue."""
-		with self._lock:
-			return any(item_name == name for item_name, _ in self.queue)
-
-	def __len__(self):
-		return len(self.queue)
-
-	def __getitem__(self, name):
-		"""Get an item from the queue by its name."""
-		with self._lock:
-			for item_name, item in self.queue:
-				if item_name == name:
-					return item
-			raise ValueError(f"Name {name} not found in queue.")
-
-	def __repr__(self):
-		"""Return a string representation of the queue."""
-		with self._lock:
-			return f"Queue({self.queue})"
-
-
 class DataManager:
-	def __init__(self, dir_root, sample_size=None, n_max_in_memory=5):
+	def __init__(self, dir_root, sample_size=None, n_max_in_memory=10):
 		"""
 		Data manager for loading images and associated data.
 		
@@ -431,20 +343,22 @@ class DataManager:
 			basename = self.basenames[idx]
 
 			path_asoc_data = None
-			if os.path.exists(os.path.join(dir_root, basename + PROBS_EXTENSION)):
-				path_asoc_data = os.path.join(dir_root, basename + PROBS_EXTENSION)
-			elif os.path.exists(os.path.join(dir_root, os.path.dirname(basename), "output",
-					os.path.split(basename)[1] + PROBS_EXTENSION)):
-				path_asoc_data = os.path.join(dir_root, os.path.dirname(basename), "output",
-						os.path.split(basename)[1] + PROBS_EXTENSION)
+			tmp = os.path.join(dir_root, basename + PROBS_EXTENSION)
+			if os.path.exists(tmp):
+				path_asoc_data = tmp
+			tmp = os.path.join(dir_root, os.path.dirname(basename), "output",
+					os.path.split(basename)[1] + PROBS_EXTENSION)
+			if os.path.exists(tmp):
+				path_asoc_data = tmp
 
 			self.paths[basename] = dict_(
+					idx=idx,
 					path_image=os.path.join(dir_root, filename),
 					path_asoc_data=path_asoc_data,
 			)
 
 		# Cache filename -> (image, data)
-		self.cache = Queue(max_size=n_max_in_memory)
+		self.cache = NamedQueue(max_size=n_max_in_memory)
 
 	def __len__(self):
 		return self.num_samples
@@ -455,8 +369,9 @@ class DataManager:
 			basename = self.basenames[idx]
 		elif isinstance(idx, str):
 			basename = idx
+			idx = self.paths[basename].idx
 		elif isinstance(idx, slice):
-			return [self[i] for i in range(self.num_samples)[idx]]. # TODO: what happens if user asks for more images than max_size?
+			return [self[i] for i in range(self.num_samples)[idx]]
 		elif isinstance(idx, list):
 			return [self[i] for i in idx]
 		else:
@@ -469,6 +384,7 @@ class DataManager:
 			data = self.cache[basename]
 			image = data.image
 			asoc_data = data.asoc_data
+			logger.debug(f"Image {idx}:{basename} loaded from cache. Cache size: {len(self.cache)}.")
 
 		else:  # Load the image and associated data
 			image = self.imread(self.paths[basename].path_image)
@@ -478,6 +394,7 @@ class DataManager:
 				asoc_data = np.load(self.paths[basename].path_asoc_data)
 			data = dict_(image=image, asoc_data=asoc_data)
 			self.cache.enqueue(name=basename, item=data)
+			logger.debug(f"Image {idx}:{basename} loaded to cache. Cache size: {len(self.cache)}.")
 
 		return image, asoc_data
 
@@ -529,6 +446,8 @@ class DataManager:
 		"""
 		if not isinstance(idx, int) and not isinstance(idx, str):
 			raise ValueError("Using iterable indices is not supported. Please call plot() for each index separately.")
+		if "cmap" in kwargs:
+			raise ValueError("cmap is not supported. Define 'cmap' in the __cfg__ file instead.")
 
 		image, asoc_data = self[idx]
 		prob = asoc_data
@@ -556,7 +475,7 @@ class DataManager:
 			axs = axs.axs.flatten()
 
 		def plot_image(ax, image, cmap="gray", **kwargs):
-			ax.imshow(image, cmap=cmap)
+			ax.imshow(image, cmap=cmap, **kwargs)
 
 		def plot_probabilities(ax, prob, cmap, **kwargs):
 			X = np.einsum("...i,ij->...j", prob, np.array(CMAP.rgb.colors))
