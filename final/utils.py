@@ -12,6 +12,7 @@ import tifffile
 import skimage
 from matplotlib.axes import Axes
 import matplotlib.pyplot as plt
+import pandas as pd
 
 from liron_utils.pure_python import NUM_CPUS, parallel_map, parallel_threading, dict_, NamedQueue
 from liron_utils.signal_processing import rescale
@@ -22,7 +23,7 @@ from __cfg__ import PATH_ILASTIK_EXE, set_props_kw_image, IMAGE_EXTENSIONS, PROB
 import tests
 
 
-def move_and_rename_files(dir_root, dir_target=None):
+def copy_and_rename_files(dir_root, dir_target=None, excel_path=None):
 	"""
 	Move images from a directory tree to a single directory and rename them accordingly.
 	Examples
@@ -58,12 +59,40 @@ def move_and_rename_files(dir_root, dir_target=None):
 	"""
 	if dir_target is None:
 		dir_target = dir_root
+	# todo: TBD
+	if excel_path:
+		experiment_data = pd.read_excel(excel_path, usecols=["A", "B", "K"], header=0)
+		experiment_data.columns = ["date", "view", "final_frame"]
+		experiment_data.dropna(subset=["final_frame"], inplace=True)
+		experiment_data["final_frame"] = experiment_data["final_frame"].astype(int)
+
 	for dir_cur, _, filenames in os.walk(dir_root, topdown=False):
 		for filename in filenames:
 			rel_path = os.path.relpath(dir_cur, dir_root)
 			filename_new = f"{rel_path.replace(os.sep, '_')}_{filename}"
+			shutil.copyfile(os.path.join(dir_cur, filename), os.path.join(dir_target, filename_new))
+
+	for dir_cur, _, filenames in os.walk(dir_root, topdown=False):
+		for filename in filenames:
+			rel_path = os.path.relpath(dir_cur, dir_root)
+			filename_new = f"{rel_path.replace(os.sep, '_')}_{filename}"
+
+			# Filter based on Excel data
+			if experiment_data is not None:
+				# Extract date and view from the directory structure
+				date, view = rel_path.split(os.sep)[:2]
+				matching_row = experiment_data[
+					(experiment_data["date"] == date) & (experiment_data["view"] == view)
+				]
+				if not matching_row.empty:
+					final_frame = matching_row.iloc[0]["final_frame"]
+					frame_number = int(os.path.splitext(filename)[0].split("_")[-1])
+					if frame_number > final_frame:
+						continue
+
 			shutil.move(os.path.join(dir_cur, filename), os.path.join(dir_target, filename_new))
-	logger.info("Finished moving files.")
+
+	logger.info("Finished copying files.")
 
 
 def select_random_images(dir_root, dir_target=None, **kwargs):
