@@ -2,10 +2,12 @@ import os
 import random
 import shutil
 from glob import glob
+from natsort import natsorted
 from multiprocessing import Pool
 import subprocess
 import numpy as np
 import tempfile
+
 from tqdm import tqdm
 import h5py
 import tifffile
@@ -14,6 +16,7 @@ from matplotlib.axes import Axes
 import matplotlib.pyplot as plt
 import pandas as pd
 
+from liron_utils.files import copy
 from liron_utils.pure_python import NUM_CPUS, parallel_map, parallel_threading, dict_, NamedQueue
 from liron_utils.signal_processing import rescale
 from liron_utils import graphics as gr
@@ -23,7 +26,16 @@ from __cfg__ import PATH_ILASTIK_EXE, set_props_kw_image, IMAGE_EXTENSIONS, PROB
 import tests
 
 
-def copy_and_rename_files(dir_root, dir_target=None, excel_path=None):
+def is_image(filename):
+	ext = os.path.splitext(filename)[1].lower()
+	if ext == ".lnk":
+		return is_image(filename.replace(".lnk", ""))
+	if ext in IMAGE_EXTENSIONS:
+		return True
+	return False
+
+
+def copy_and_rename_files(dir_root, dir_target=None, path_excel=None, overwrite=False, symlink=True):
 	"""
 	Move images from a directory tree to a single directory and rename them accordingly.
 	Examples
@@ -39,19 +51,31 @@ def copy_and_rename_files(dir_root, dir_target=None, excel_path=None):
     │   │   ├── image2.png
 
     └── dir_target
-    │   ├── ABC_abc_image1.png
-    │   ├── ABC_image1.png
-    │   ├── ABC_image2.png
-    │   ├── DEF_image1.png
-    │   ├── DEF_image2.png
+    │   ├── ABC__abc__image1.png
+    │   ├── ABC__image1.png
+    │   ├── ABC__image2.png
+    │   ├── DEF__image1.png
+    │   ├── DEF__image2.png
 
 
 	Parameters
 	----------
-	dir_root :          str
+	dir_root :              str
 		Path to the root directory containing the images.
-	dir_target :        str
+	dir_target :            str
 		Path to the target directory where the images will be moved. If not specified, dir_root is used.
+	path_excel :            str
+		Path to an Excel file containing additional data. If specified, the function will filter the images based on
+		the data in the Excel file. The Excel file should contain columns: ["Date", "Pos", "final frame of beta catenin"]
+		When provided, the directory tree is assumed to have the following structure (<> is a placeholder for the actual
+		values and their format):
+		└── dir_root
+	    │   ├── <Date yyyy_mm_dd>
+	    │   │   ├── View<Pos #>
+	    │   │   │   ├── Max_C1 (doesn't have to appear)
+	    │   │   │   │   ├── <image_name>.tif
+	overwrite, symlink :    bool, optional
+		See copy()
 
 	Returns
 	-------
@@ -59,40 +83,61 @@ def copy_and_rename_files(dir_root, dir_target=None, excel_path=None):
 	"""
 	if dir_target is None:
 		dir_target = dir_root
-	# todo: TBD
-	if excel_path:
-		experiment_data = pd.read_excel(excel_path, usecols=["A", "B", "K"], header=0)
-		experiment_data.columns = ["date", "view", "final_frame"]
-		experiment_data.dropna(subset=["final_frame"], inplace=True)
-		experiment_data["final_frame"] = experiment_data["final_frame"].astype(int)
 
+	excel_data = None
+	if path_excel is not None:
+		try:
+			excel_data = pd.read_excel(path_excel)
+		except PermissionError:
+			logger.error(f"Permission error. Make sure to close the Excel file before running the script.")
+			raise
+		excel_data["Date"] = pd.to_datetime(excel_data["Date"], format="%d.%m.%y")
+		excel_data["Date"] = excel_data["Date"].ffill()
+		excel_data["Pos"] = excel_data["Pos"].astype(int, errors="ignore")
+		excel_data["Pos"] = excel_data["Pos"].ffill()
+
+	n_files = 0
+	os.makedirs(dir_target, exist_ok=True)
 	for dir_cur, _, filenames in os.walk(dir_root, topdown=False):
-		for filename in filenames:
-			rel_path = os.path.relpath(dir_cur, dir_root)
-			filename_new = f"{rel_path.replace(os.sep, '_')}_{filename}"
-			shutil.copyfile(os.path.join(dir_cur, filename), os.path.join(dir_target, filename_new))
+		filenames = natsorted([f for f in filenames if is_image(f)])
+		if len(filenames) == 0:
+			continue
 
-	for dir_cur, _, filenames in os.walk(dir_root, topdown=False):
-		for filename in filenames:
-			rel_path = os.path.relpath(dir_cur, dir_root)
-			filename_new = f"{rel_path.replace(os.sep, '_')}_{filename}"
+		rel_path = os.path.relpath(dir_cur, dir_root)
 
-			# Filter based on Excel data
-			if experiment_data is not None:
-				# Extract date and view from the directory structure
-				date, view = rel_path.split(os.sep)[:2]
-				matching_row = experiment_data[
-					(experiment_data["date"] == date) & (experiment_data["view"] == view)
-				]
-				if not matching_row.empty:
-					final_frame = matching_row.iloc[0]["final_frame"]
-					frame_number = int(os.path.splitext(filename)[0].split("_")[-1])
-					if frame_number > final_frame:
-						continue
+		if excel_data is not None:  # Filter based on Excel data
+			dir_cur_list = rel_path.split(os.sep)  # e.g., ['2025_01_29', 'View1', 'Max_C1']
+			if len(dir_cur_list) < 2:
+				continue  # should have ./<date>/<View#>
 
-			shutil.move(os.path.join(dir_cur, filename), os.path.join(dir_target, filename_new))
+			dir_cur_data_date = pd.to_datetime(dir_cur_list[0], format="%Y_%m_%d")
+			dir_cur_data_view = int(dir_cur_list[1].lower().split("view")[-1])
 
-	logger.info("Finished copying files.")
+			# Check if the current date and view match any rows in the Excel data
+			matching_rows = excel_data[excel_data["Date"] == dir_cur_data_date]
+			if matching_rows.empty:
+				logger.warning(f"No matching rows found in Excel file for "
+				               f"date {dir_cur_data_date.strftime('%Y_%m_%d')}.")
+				continue
+
+			matching_rows = matching_rows[matching_rows["Pos"] == dir_cur_data_view]
+			if matching_rows.empty:
+				logger.warning(f"No matching rows found in Excel file for "
+				               f"date {dir_cur_data_date.strftime('%Y_%m_%d')} and view {dir_cur_data_view}.")
+				continue
+
+			max_frame = int(matching_rows["final frame of beta catenin"].max())
+			filenames = filenames[:max_frame + 1]
+
+		copy(src=[os.path.join(dir_cur, f) for f in filenames],
+				dst=[os.path.join(dir_target, f"{rel_path.replace(os.sep, '__')}__{f}")
+					for f in filenames],  # e.g., 2025_01_29__View1__Max_C1__image1.tif,
+				overwrite=overwrite,
+				symlink=symlink)
+
+		n_files += len(filenames)
+
+	logger.info(f"Finished copying {n_files} file{' links' if symlink else 's'} into {dir_target}.")
 
 
 def select_random_images(dir_root, dir_target=None, **kwargs):
@@ -136,7 +181,7 @@ def select_random_images(dir_root, dir_target=None, **kwargs):
 
 	sets = dict_(all=dict_(dir=dir_root, files=[]))
 	# Filter the file list to only include image files
-	sets.all.files = [f for f in os.listdir(sets.all.dir) if os.path.splitext(f)[1].lower() in IMAGE_EXTENSIONS]
+	sets.all.files = [f for f in os.listdir(sets.all.dir) if is_image(f)]
 	logger.info(f'Found {len(sets.all.files)} images in {sets.all.dir}.')
 
 	num_desired_images = 0
@@ -154,7 +199,7 @@ def select_random_images(dir_root, dir_target=None, **kwargs):
 		if key == "all":
 			continue
 		if os.path.exists(sets[key].dir):
-			filenames_key = [f for f in os.listdir(sets[key].dir) if os.path.splitext(f)[1].lower() in IMAGE_EXTENSIONS]
+			filenames_key = [f for f in os.listdir(sets[key].dir) if is_image(f)]
 			logger.info(f'Found {len(filenames_key)} images in {key}, which will not be considered for selection.')
 			sets.all.files = [f for f in sets.all.files if f not in filenames_key]
 			sets[key].n = max(sets[key].n - len(filenames_key), 0)
@@ -340,7 +385,7 @@ class DataManager:
 		filenames_images = []
 		for dir_cur, _, filenames in os.walk(dir_root, topdown=False):
 			for filename in filenames:
-				if os.path.splitext(filename)[1].lower() in IMAGE_EXTENSIONS:
+				if is_image(filename):
 					rel_path = os.path.relpath(dir_cur, dir_root)
 					if rel_path == ".":
 						rel_path = ""
@@ -367,7 +412,7 @@ class DataManager:
 
 		# Load all associated data
 		self.basenames = [os.path.splitext(f)[0] for f in filenames_images]
-		self.paths = dict_()
+		self.paths = dict_()  # {<basename>: {<idx>, <path_image>, <path_asoc_data>}}
 		for idx, filename in enumerate(filenames_images):
 			basename = self.basenames[idx]
 
@@ -441,6 +486,22 @@ class DataManager:
 			raise TypeError(f"Index must be an integer or a string (given {type(idx)} instead).")
 
 		return self.paths[basename].path_asoc_data is not None
+
+	def copy_images(self, dir_target):
+		"""
+		Copy images to a target directory.
+
+		Parameters
+		----------
+		dir_target : str
+			Path to the target directory where the images will be copied.
+
+		Returns
+		-------
+
+		"""
+		src = [os.path.join(self.dir_root, self.paths[basename].path_image) for basename in self.paths]
+		copy(src=src, dst=dir_target)
 
 	@staticmethod
 	def imread(filename):
