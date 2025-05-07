@@ -6,15 +6,7 @@ import matplotlib.pyplot as plt
 from liron_utils import graphics as gr
 
 from __cfg__ import logger, set_props_kw_image
-from utils import copy_and_rename_files, select_random_images, run_ilastik, \
-	run_ilastik_parallel, DataManager
-
-# select_random_images(
-# 		dir_root=r"C:\Users\liron\Downloads\Data\all",
-# 		dir_target=r"C:\Users\liron\Downloads\Data",
-# 		train=300,
-# 		test=300
-# )
+from utils import copy_and_rename_files, run_ilastik, run_ilastik_parallel, DataManager
 
 # copy_and_rename_files(
 # 		dir_root=r"C:\Users\liron\OneDrive - Technion\Homework\2025B\114252 - Project T\Data\original",

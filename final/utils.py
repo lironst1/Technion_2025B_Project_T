@@ -140,99 +140,13 @@ def copy_and_rename_files(dir_root, dir_target=None, path_excel=None, overwrite=
 	logger.info(f"Finished copying {n_files} file{' links' if symlink else 's'} into {dir_target}.")
 
 
-def select_random_images(dir_root, dir_target=None, **kwargs):
-	"""
-	Select a subset of images from a directory and move them to separate directories for training and testing.
-
-	Examples
-	--------
-	Select 100 training images and 50 testing images from dir_root to dir_target. This will assume the following
-	directory structure:
-	└── dir_root
-    │   ├── image1.png
-    │   ├── image2.png
-    │   ├── ...
-
-    └── dir_target
-    │   ├── train
-    │   │   ├── image1.png
-    │   │   ├── ...
-    │   ├── test
-    │   │   ├── image2.png
-    │   │   ├── ...
-	>>> select_random_images(dir_root="~/Downloads/Data/all", dir_target="~/Downloads/Data", train=100, test=50)
-
-	Parameters
-	----------
-	dir_root :      str
-		Path to the root directory containing the images.
-	dir_target :    str, optional
-		Path to the target directory where the selected images will be copied. If not specified, dir_root is used.
-	kwargs :        Keyword arguments for specifying the number of images for each set (training, testing, validation, etc.).
-
-	Returns
-	-------
-
-	"""
-	if len(kwargs) == 0:
-		raise ValueError("At least one set must be specified (train, test, validation, etc.).")
-	if dir_target is None:
-		dir_target = dir_root
-
-	sets = dict_(all=dict_(dir=dir_root, files=[]))
-	# Filter the file list to only include image files
-	sets.all.files = [f for f in os.listdir(sets.all.dir) if is_image(f)]
-	logger.info(f'Found {len(sets.all.files)} images in {sets.all.dir}.')
-
-	num_desired_images = 0
-	for key, n in kwargs.items():
-		if n < 0:
-			raise ValueError(f"n_{key} must be a non-negative integer (given {n} instead).")
-		num_desired_images += n
-		sets[key] = dict_(dir=os.path.join(dir_target, key), n=n, files=[])
-
-	if num_desired_images > len(sets.all.files):
-		raise ValueError("Total number of desired images exceeds the number of available images.")
-
-	# Don't select images that are already in the train/test directories
-	for key in sets:
-		if key == "all":
-			continue
-		if os.path.exists(sets[key].dir):
-			filenames_key = [f for f in os.listdir(sets[key].dir) if is_image(f)]
-			logger.info(f'Found {len(filenames_key)} images in {key}, which will not be considered for selection.')
-			sets.all.files = [f for f in sets.all.files if f not in filenames_key]
-			sets[key].n = max(sets[key].n - len(filenames_key), 0)
-
-	# Randomly select images
-	filenames_selected = random.sample(sets.all.files, num_desired_images)
-
-	# Copy selected images
-	num_images_cur = 0
-	for key in sets:
-		if key == "all":
-			continue
-		if sets[key].n == 0:
-			continue
-
-		sets[key].files = filenames_selected[num_images_cur:num_images_cur + sets[key].n]
-		num_images_cur += sets[key].n
-
-		# Copy selected images
-		logger.info(f"Copying {sets[key].n} images to {key}...")
-		os.makedirs(sets[key].dir, exist_ok=True)
-		for f in sets[key].files:
-			shutil.copyfile(src=os.path.join(sets.all.dir, f), dst=os.path.join(sets[key].dir, f))
-
-	logger.info("Finished copying images.")
-
-
 def run_ilastik(path_project, dir_root, image_ext=".tif"):
 	if not os.path.exists(path_project):
 		raise ValueError(f"Project file not found at {path_project}")
 	if not os.path.isdir(dir_root):
 		raise ValueError(f"Path is not a directory: {dir_root}")
-	if " " in path_project or " " in dir_root:  # Ilastik doesn't like spaces in the path_project
+	if " " in path_project or " " in dir_root:
+		# Ilastik doesn't like spaces in path_project and dir_root, so we'll need to create a symlink to them
 		tests.test_symlink_admin_priv()
 	if image_ext not in IMAGE_EXTENSIONS:
 		raise ValueError(f"Invalid image extension: {image_ext}. Supported extensions are: {IMAGE_EXTENSIONS}")
