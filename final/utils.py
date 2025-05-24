@@ -7,12 +7,15 @@ import skimage
 from matplotlib.axes import Axes
 import matplotlib.pyplot as plt
 import pandas as pd
+from tqdm import tqdm
+from collections import defaultdict
+from prettytable import PrettyTable
 
 from liron_utils.files import copy
 from liron_utils.pure_python import dict_, NamedQueue
 from liron_utils import graphics as gr
 
-from __cfg__ import IMAGE_EXTENSIONS, PROBS_EXTENSION, CMAP, logger, EQUALIZE_ADAPTHIST_KW
+from __cfg__ import IMAGE_EXTENSIONS, ILASTIK_PROBS_EXTENSION, CMAP, logger, EQUALIZE_ADAPTHIST_KW
 
 
 def is_image(filename):
@@ -24,7 +27,71 @@ def is_image(filename):
 	return False
 
 
-def copy_and_rename_files(dir_root, dir_target=None, path_excel=None, overwrite=False, symlink=True):
+def print_image_tree(dir_root):
+	"""
+    Print the directory tree under `all_dir`, showing the number of images and labels in each logical group.
+
+    Parameters
+    ----------
+    all_dir : str or Path
+        Path to the parent directory containing 'data' and 'labels' subdirectories.
+    image_exts : tuple
+        Allowed image file extensions.
+    """
+	dir_data = os.path.join(dir_root, "data")
+	dir_labels = os.path.join(dir_root, "labels")
+
+	if not os.path.exists(dir_data) or not os.path.exists(dir_labels):
+		raise ValueError(f"Expected 'data' and 'labels' directories inside {dir_root}")
+
+	# Collect image and label file paths
+	files_data = natsorted([f.replace(".lnk", "") for f in os.listdir(dir_data) if is_image(f)])
+	files_labels = natsorted([f.replace(".lnk", "") for f in os.listdir(dir_labels) if is_image(f)])
+
+	# Build maps from logical group (e.g., ABC, ABC__abc) to counts
+	image_counts = defaultdict(int)
+	label_counts = defaultdict(int)
+
+	def get_logical_group(filename):
+		parts = filename.split("__")
+		if len(parts) > 1:
+			return "__".join(parts[:-1])
+		return "."
+
+	for f in files_data:
+		group = get_logical_group(f)
+		image_counts[group] += 1
+
+	for f in files_labels:
+		group = get_logical_group(f)
+		label_counts[group] += 1
+
+	# Print header
+	field_names = ["Experiment", "Images", "Labels"]
+	table = PrettyTable(field_names=field_names)
+	table.align["Experiment"] = "l"
+	table.align["Images"] = "r"
+	table.align["Labels"] = "r"
+
+	total_images = 0
+	total_labels = 0
+
+	all_keys = natsorted(set(image_counts) | set(label_counts))
+	for key in all_keys:
+		count_image = image_counts[key]
+		count_label = label_counts[key]
+		table.add_row([key, count_image if count_image > 0 else "", count_label if count_label > 0 else ""])
+		total_images += count_image
+		total_labels += count_label
+
+	# Add total row
+	table.add_row(["-" * len(field) for field in field_names])
+	table.add_row(["TOTAL", total_images, f"{total_labels} ({total_labels / total_images:.2%})"])
+
+	print(table)
+
+
+def flatten_image_tree(dir_root, dir_target=None, path_excel=None, overwrite=False, symlink=True):
 	"""
 	Move images from a directory tree to a single directory and rename them accordingly.
 	Examples
@@ -87,7 +154,7 @@ def copy_and_rename_files(dir_root, dir_target=None, path_excel=None, overwrite=
 
 	n_files = 0
 	os.makedirs(dir_target, exist_ok=True)
-	for dir_cur, _, filenames in os.walk(dir_root, topdown=False):
+	for dir_cur, _, filenames in tqdm(os.walk(dir_root, topdown=False), desc="Copying files", unit="files"):
 		filenames = natsorted([f for f in filenames if is_image(f)])
 		if len(filenames) == 0:
 			continue
@@ -281,11 +348,11 @@ class DataManager:
 			basename = self.basenames[idx]
 
 			path_asoc_data = None
-			tmp = os.path.join(dir_root, basename + PROBS_EXTENSION)
+			tmp = os.path.join(dir_root, basename + ILASTIK_PROBS_EXTENSION)
 			if os.path.exists(tmp):
 				path_asoc_data = tmp
 			tmp = os.path.join(dir_root, os.path.dirname(basename), "output",
-					os.path.split(basename)[1] + PROBS_EXTENSION)
+					os.path.split(basename)[1] + ILASTIK_PROBS_EXTENSION)
 			if os.path.exists(tmp):
 				path_asoc_data = tmp
 
