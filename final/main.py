@@ -9,11 +9,11 @@ from __cfg__ import logger, set_props_kw_image, rel_path
 from utils import flatten_image_tree, DataManager, print_image_tree
 from utils_napari import split_labels_tif
 
-# copy_and_rename_files(
-# 		dir_root=r"C:\Users\liron\OneDrive - Technion\Homework\2025B\114252 - Project T\Data\original",
-# 		dir_target=r"C:\Users\liron\OneDrive - Technion\Homework\2025B\114252 - Project T\Data\all",
-# 		# path_excel=r"C:\Users\liron\OneDrive - Technion\Homework\2025B\114252 - Project T\Data\betacatenin_head.xlsx",
-# )
+flatten_image_tree(
+		dir_root=r"C:\Users\liron\OneDrive - Technion\Homework\2025B\114252 - Project T\Data\original",
+		dir_target=r"C:\Users\liron\OneDrive - Technion\Homework\2025B\114252 - Project T\Data\all",
+		path_excel=r"C:\Users\liron\OneDrive - Technion\Homework\2025B\114252 - Project T\Data\betacatenin_head.xlsx",
+)
 
 dm = DataManager(
 		dir_root=rel_path("all_head"),

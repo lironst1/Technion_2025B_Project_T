@@ -16,6 +16,7 @@ from liron_utils.pure_python import dict_, NamedQueue
 from liron_utils import graphics as gr
 
 from __cfg__ import IMAGE_EXTENSIONS, ILASTIK_PROBS_EXTENSION, CMAP, logger, EQUALIZE_ADAPTHIST_KW
+import tests
 
 
 def is_image(filename):
@@ -42,7 +43,7 @@ def print_image_tree(dir_root):
 	dir_labels = os.path.join(dir_root, "labels")
 
 	if not os.path.exists(dir_data) or not os.path.exists(dir_labels):
-		raise ValueError(f"Expected 'data' and 'labels' directories inside {dir_root}")
+		raise FileNotFoundError(f"Expected 'data' and 'labels' directories inside {dir_root}")
 
 	# Collect image and label file paths
 	files_data = natsorted([f.replace(".lnk", "") for f in os.listdir(dir_data) if is_image(f)])
@@ -94,8 +95,7 @@ def print_image_tree(dir_root):
 def flatten_image_tree(dir_root, dir_target=None, path_excel=None, overwrite=False, symlink=True):
 	"""
 	Move images from a directory tree to a single directory and rename them accordingly.
-	Examples
-	--------
+
 	└── dir_root
     │   ├── ABC
     │   │   ├── abc
@@ -113,6 +113,9 @@ def flatten_image_tree(dir_root, dir_target=None, path_excel=None, overwrite=Fal
     │   ├── DEF__image1.png
     │   ├── DEF__image2.png
 
+	Examples
+	--------
+	>>> flatten_image_tree(dir_root='./original', dir_target='./all_head', path_excel='./betacatenin_head.xlsx')
 
 	Parameters
 	----------
@@ -121,10 +124,9 @@ def flatten_image_tree(dir_root, dir_target=None, path_excel=None, overwrite=Fal
 	dir_target :            str
 		Path to the target directory where the images will be moved. If not specified, dir_root is used.
 	path_excel :            str
-		Path to an Excel file containing additional data. If specified, the function will filter the images based on
-		the data in the Excel file. The Excel file should contain columns: ["Date", "Pos", "final frame of beta catenin"]
-		When provided, the directory tree is assumed to have the following structure (<> is a placeholder for the actual
-		values and their format):
+		Path to an Excel file. If specified, the function will filter the images based on the data in the Excel file.
+		The Excel file should contain columns: ["Date", "Pos", "final frame of beta catenin"]. When provided, the directory
+		tree is assumed to have the following structure (<> is a placeholder for the actual values and their format):
 		└── dir_root
 	    │   ├── <Date yyyy_mm_dd>
 	    │   │   ├── View<Pos #>
@@ -142,11 +144,8 @@ def flatten_image_tree(dir_root, dir_target=None, path_excel=None, overwrite=Fal
 
 	excel_data = None
 	if path_excel is not None:
-		try:
-			excel_data = pd.read_excel(path_excel)
-		except PermissionError:
-			logger.error(f"Permission error. Make sure to close the Excel file before running the script.")
-			raise
+		tests.excel_permissions(path_excel)  # Check if the user has permissions to access the Excel file
+		excel_data = pd.read_excel(path_excel)
 		excel_data["Date"] = pd.to_datetime(excel_data["Date"], format="%d.%m.%y")
 		excel_data["Date"] = excel_data["Date"].ffill()
 		excel_data["Pos"] = excel_data["Pos"].astype(int, errors="ignore")
@@ -196,93 +195,6 @@ def flatten_image_tree(dir_root, dir_target=None, path_excel=None, overwrite=Fal
 	logger.info(f"Finished copying {n_files} file{' links' if symlink else 's'} into {dir_target}.")
 
 
-def select_random_images(dir_root, dir_target=None, **kwargs):
-	"""
-	Select a subset of images from a directory and move them to separate directories for training and testing.
-
-	Examples
-	--------
-	Select 100 training images and 50 testing images from dir_root to dir_target. This will assume the following
-	directory structure:
-	└── dir_root
-    │   ├── image1.png
-    │   ├── image2.png
-    │   ├── ...
-
-    └── dir_target
-    │   ├── train
-    │   │   ├── image1.png
-    │   │   ├── ...
-    │   ├── test
-    │   │   ├── image2.png
-    │   │   ├── ...
-	>>> select_random_images(dir_root="~/Downloads/Data/all", dir_target="~/Downloads/Data", train=100, test=50)
-
-	Parameters
-	----------
-	dir_root :      str
-		Path to the root directory containing the images.
-	dir_target :    str, optional
-		Path to the target directory where the selected images will be copied. If not specified, dir_root is used.
-	kwargs :        Keyword arguments for specifying the number of images for each set (training, testing, validation, etc.).
-
-	Returns
-	-------
-
-	"""
-	if len(kwargs) == 0:
-		raise ValueError("At least one set must be specified (train, test, validation, etc.).")
-	if dir_target is None:
-		dir_target = dir_root
-
-	sets = dict_(all=dict_(dir=dir_root, files=[]))
-	# Filter the file list to only include image files
-	sets.all.files = [f for f in os.listdir(sets.all.dir) if is_image(f)]
-	logger.info(f'Found {len(sets.all.files)} images in {sets.all.dir}.')
-
-	num_desired_images = 0
-	for key, n in kwargs.items():
-		if n < 0:
-			raise ValueError(f"n_{key} must be a non-negative integer (given {n} instead).")
-		num_desired_images += n
-		sets[key] = dict_(dir=os.path.join(dir_target, key), n=n, files=[])
-
-	if num_desired_images > len(sets.all.files):
-		raise ValueError("Total number of desired images exceeds the number of available images.")
-
-	# Don't select images that are already in the train/test directories
-	for key in sets:
-		if key == "all":
-			continue
-		if os.path.exists(sets[key].dir):
-			filenames_key = [f for f in os.listdir(sets[key].dir) if is_image(f)]
-			logger.info(f'Found {len(filenames_key)} images in {key}, which will not be considered for selection.')
-			sets.all.files = [f for f in sets.all.files if f not in filenames_key]
-			sets[key].n = max(sets[key].n - len(filenames_key), 0)
-
-	# Randomly select images
-	filenames_selected = random.sample(sets.all.files, num_desired_images)
-
-	# Copy selected images
-	num_images_cur = 0
-	for key in sets:
-		if key == "all":
-			continue
-		if sets[key].n == 0:
-			continue
-
-		sets[key].files = filenames_selected[num_images_cur:num_images_cur + sets[key].n]
-		num_images_cur += sets[key].n
-
-		# Copy selected images
-		logger.info(f"Copying {sets[key].n} images to {key}...")
-		os.makedirs(sets[key].dir, exist_ok=True)
-		for f in sets[key].files:
-			shutil.copyfile(src=os.path.join(sets.all.dir, f), dst=os.path.join(sets[key].dir, f))
-
-	logger.info("Finished copying images.")
-
-
 class DataManager:
 	def __init__(self, dir_root, sample_size=None, n_max_in_memory=10):
 		"""
@@ -293,13 +205,16 @@ class DataManager:
 		dir_root :            str
 			Path to the directory/tree containing images.
 			Associated data is assumed to be in the same directory as each image, or in an ./output directory, e.g.:
-			└── dir_root
-		    │   ├── ABC
-		    │   │   ├── image1.png
-		    │   │   ├── ...
-		    │   │   ├── output
-		    │   │   │   ├── image1.npy
-		    │   │   │   ├── ...
+		    └── all
+			│   ├── data (links to images, flattened to a single directory)
+			│   │   ├── 2025_01_29__View1__Max_C1__1_beta_cat_25x_10min_T2_C1.tif.lnk
+			│   │   ├── ...
+			│   ├── labels
+			│   │   ├── 2025_01_29__View1__Max_C1__1_beta_cat_25x_10min_T2_C1.tif
+			│   │   ├── ...
+			│   ├── outputs (pixel classifier outputs)
+			│   │   ├── 2025_01_29__View1__Max_C1__1_beta_cat_25x_10min_T2_C1_Probabilities_.npy
+			│   │   ├── ...
 		sample_size :           int, float, or bool, optional
 			Number of images to randomly sample from the directory.
 			If given in the range (0, 1], it is interpreted as a fraction (True is the same as 1, i.e., use all data in
@@ -308,8 +223,7 @@ class DataManager:
 			Maximum number of images to keep in memory at once. If exceeded, the oldest image will be removed from
 			memory. Default is 5.
 		"""
-		if not os.path.isdir(dir_root):
-			raise ValueError(f"Image directory not found: {dir_root}")
+		tests.dir_exist(dir_root)
 		self.dir_root = dir_root
 
 		# Discover image and data files
@@ -468,7 +382,7 @@ class DataManager:
 		if not isinstance(idx, int) and not isinstance(idx, str):
 			raise ValueError("Using iterable indices is not supported. Please call plot() for each index separately.")
 		if "cmap" in kwargs:
-			raise ValueError("cmap is not supported. Define 'cmap' in the __cfg__ file instead.")
+			raise ValueError("`cmap` keyword argument is not supported. Define `cmap` in the __cfg__ file instead.")
 
 		image, asoc_data = self[idx]
 		prob = asoc_data
@@ -483,7 +397,7 @@ class DataManager:
 			else:
 				which = [which]
 		if not set(which).issubset(set(WHICH_VALUES)):
-			raise ValueError(f"Invalid value in 'which'. Allowed values are: {WHICH_VALUES} or 'all'.")
+			raise ValueError(f"Invalid value in `which`. Allowed values are: {WHICH_VALUES} or 'all'.")
 
 		if axs is None:  # create new axes
 			shape = (1, len(which))

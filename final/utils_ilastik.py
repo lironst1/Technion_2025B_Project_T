@@ -18,7 +18,7 @@ def run_ilastik(path_project, dir_root, image_ext=".tif"):
 	if not os.path.isdir(dir_root):
 		raise ValueError(f"Path is not a directory: {dir_root}")
 	if " " in path_project or " " in dir_root:  # Ilastik doesn't like spaces in the path_project
-		tests.test_symlink_admin_priv()
+		tests.symlink_admin_priv()
 	if image_ext not in IMAGE_EXTENSIONS:
 		raise ValueError(f"Invalid image extension: {image_ext}. Supported extensions are: {IMAGE_EXTENSIONS}")
 
