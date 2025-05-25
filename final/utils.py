@@ -1,4 +1,5 @@
 import os
+import warnings
 import random
 import shutil
 from natsort import natsorted
@@ -22,7 +23,8 @@ from liron_utils.pure_python import dict_, NamedQueue
 from liron_utils.files import open_file
 from liron_utils import graphics as gr
 
-from __cfg__ import IMAGE_EXTENSIONS, CMAP, logger, EQUALIZE_ADAPTHIST_KW, SIGMAS, RANDOM_FOREST_CLASSIFIER_KW
+from __cfg__ import IMAGE_EXTENSIONS, CMAP, logger, EQUALIZE_ADAPTHIST_KW, SIGMAS, RANDOM_FOREST_CLASSIFIER_KW, \
+	HIST_EQUALIZE
 import tests
 
 
@@ -204,7 +206,7 @@ def flatten_image_tree(dir_root, dir_target=None, path_excel=None, overwrite=Fal
 
 
 class DataManager:
-	def __init__(self, dir_root, sample_size=None, n_max_in_memory=10):
+	def __init__(self, dir_root, sample_size=None, n_max_in_memory=10, labeled=None):
 		"""
 		Data manager for loading images and associated data.
 		
@@ -230,19 +232,29 @@ class DataManager:
 		n_max_in_memory :       int, optional
 			Maximum number of images to keep in memory at once. If exceeded, the oldest image will be removed from
 			memory. Default is 5.
+		labeled :               bool or None, optional
+			If True, only labeled images will be loaded.
+			If False, only unlabeled images will be loaded.
+			If None, both labeled and unlabeled images will be loaded.
 		"""
 		tests.dir_exist(dir_root)
 		self.dir_root = dir_root
 
 		# Discover image and data files
 		filenames_images = []
-		for dir_cur, _, filenames in os.walk(dir_root, topdown=False):
+		for dir_cur, _, filenames in os.walk(os.path.join(dir_root, "data"), topdown=False):
 			for filename in filenames:
 				if is_image(filename):
 					rel_path = os.path.relpath(dir_cur, os.path.join(dir_root, "data"))
 					if rel_path == ".":
 						rel_path = ""
-					filenames_images.append(os.path.join(rel_path, filename))
+					filename_image = os.path.join(rel_path, filename)
+					if labeled is not None:  # Filter images based on labeled status
+						filename_label = os.path.join(dir_root, "labels", filename)
+						if labeled is True and not os.path.exists(filename_label) or \
+								labeled is False and os.path.exists(filename_label):
+							continue
+					filenames_images.append(filename_image)
 
 		# Random sampling
 		if sample_size is not None and sample_size is not False:
@@ -289,7 +301,7 @@ class DataManager:
 					path_prob=path_prob,
 			)
 
-		# Cache filename -> (image, data)
+		# Cache basename -> data
 		self.cache = NamedQueue(max_size=n_max_in_memory)
 
 	def __len__(self):
@@ -319,7 +331,7 @@ class DataManager:
 			logger.debug(f"Image {idx}:{basename} loaded from cache. Cache size: {len(self.cache)}.")
 
 		else:  # Load the image and associated data
-			image = self.imread(self.paths[basename].path_image)
+			image = self.imread(self.paths[basename].path_image, hist_equalize=HIST_EQUALIZE)
 
 			labels, prob = None, None
 			if self.paths[basename].path_labels is not None:
@@ -333,7 +345,12 @@ class DataManager:
 
 			logger.debug(f"Image {idx}:{basename} loaded to cache. Cache size: {len(self.cache)}.")
 
-		return basename, image, labels, prob
+		out = dict_(basename=basename, image=image, labels=labels, prob=prob)
+		return out
+
+	def get_labeled_data(self):
+		"""Get all images with associated labels."""
+		return [self[idx] for idx in range(self.num_samples) if self.has_labels(idx)]
 
 	def has_labels(self, idx):
 		"""Check if the image has labels."""
@@ -387,12 +404,13 @@ class DataManager:
 			copy(src=src, dst=os.path.join(dir_target, dir))
 
 	@staticmethod
-	def imread(filename):
+	def imread(filename, hist_equalize=False):
 		image = tifffile.imread(filename)
-		image = skimage.exposure.equalize_adapthist(image, **EQUALIZE_ADAPTHIST_KW)
+		if hist_equalize:
+			image = skimage.exposure.equalize_adapthist(image, **EQUALIZE_ADAPTHIST_KW)
 		return image
 
-	def plot(self, idx, axs=None, which="all", **kwargs):
+	def plot(self, idx, prob=None, axs=None, which="all", **kwargs):
 		"""
 		Plot predictions.
 
@@ -422,7 +440,11 @@ class DataManager:
 		if "cmap" in kwargs:
 			raise ValueError("`cmap` keyword argument is not supported. Define `cmap` in the __cfg__ file instead.")
 
-		basename, image, labels, prob = self[idx]
+		data = self[idx]
+		basename, image, labels, prob_tmp = data.basenames, data.image, data.labels, data.prob
+
+		if prob is None:
+			prob = prob_tmp
 
 		WHICH_VALUES = ["image", "probabilities", "predictions", "image+probabilities"]
 		if isinstance(which, str):
@@ -463,6 +485,7 @@ class DataManager:
 
 			if which[i] == "image":
 				plot_image(ax, image, **kwargs)
+				ax.set_title("Image")
 			else:
 				if prob is None:
 					logger.warning(f"Image {idx} has no associated data. Skipping {which[i]} plot.")
@@ -470,11 +493,14 @@ class DataManager:
 
 				if which[i] == "probabilities":
 					plot_probabilities(ax, prob, cmap=CMAP.rgb, **kwargs)
+					ax.set_title("Probabilities")
 				elif which[i] == "predictions":
 					plot_predictions(ax, prob, cmap=CMAP.rgb, **kwargs)
+					ax.set_title("Predictions")
 				else:  # which[i] == "image+probabilities":
 					plot_image(ax, image, **kwargs)
 					plot_probabilities(ax, prob, cmap=CMAP.rgba, **kwargs)
+					ax.set_title("Image + Probabilities")
 
 		return axs
 
@@ -535,71 +561,87 @@ class PixelClassifier:
 			# Texture (Local binary pattern)
 			# Note: LBP is typically applied to 2D grayscale images
 			# For simplicity, we'll use a basic texture measure: variance in a window
-			size = int(2 * np.ceil(3 * sigma) + 1)
-			local_var = windowed_histogram(image=image.astype(np.uint8), footprint=np.ones((size, size)))
-			features.append(local_var)
-			self.feature_names.append(f'local_variance_{sigma}')
+		# size = int(2 * np.ceil(3 * sigma) + 1)
+		# local_var = windowed_histogram(image=image.astype(np.uint8), footprint=np.ones((size, size)))
+		# features.append(local_var)
+		# self.feature_names.append(f'local_variance_{sigma}')
 
 		# Stack features into a (H, W, F) array
 		feature_stack = np.stack(features, axis=-1)
 		return feature_stack
 
-	def fit(self, image, labels):
+	def fit(self, images, labels):
 		"""
-		Train the Random Forest classifier using labeled pixels in the image.
+		Train the classifier using multiple images and corresponding label masks.
 
 		Parameters
 		----------
-		image : np.ndarray
-		    2D grayscale image.
-		labels : np.ndarray
-		    2D label mask of the same shape as `image`. Unlabeled pixels should have value 0.
+		images : list[np.ndarray]
+		    List of 2D grayscale images.
+		labels : list[np.ndarray]
+		    List of 2D label masks. Unlabeled pixels should have value 0.
 		"""
-		feature_stack = self._compute_features(image)
-		X = feature_stack[labels > 0]
-		y = labels[labels > 0]
+		if not isinstance(images, list):
+			images = [images]
+			labels = [labels]
 
-		# Flatten features and scale
-		X_flat = X.reshape(-1, X.shape[-1])
-		X_scaled = self.scaler.fit_transform(X_flat)
+		X_all, y_all = [], []
+		for image, label in tqdm(zip(images, labels), desc="Training PixelClassifier", unit="image", total=len(images)):
+			features = self._compute_features(image)
+			X = features[label > 0]
+			y = label[label > 0]
+			X_all.append(X)
+			y_all.append(y)
 
-		self.clf.fit(X_scaled, y)
+		X_concat = np.concatenate(X_all, axis=0)
+		y_concat = np.concatenate(y_all, axis=0)
 
-	def predict_prob(self, image):
+		X_scaled = self.scaler.fit_transform(X_concat)
+		self.clf.fit(X_scaled, y_concat)
+
+	def predict_prob(self, images):
 		"""
-		Predict class probabilities for each pixel in the image.
+		Predict class probabilities for each pixel in each image.
 
 		Parameters
 		----------
-		image : np.ndarray
-		    2D grayscale image.
+		images : list[np.ndarray]
+		    2D grayscale image or list of such images.
 
 		Returns
 		-------
-		A 3D array of shape (H, W, C) where C is the number of classes.
+		List of 3D arrays, each of shape (H, W, C).
 		"""
-		feature_stack = self._compute_features(image)
-		H, W, N = feature_stack.shape
-		X_flat = feature_stack.reshape(-1, N)
-		X_scaled = self.scaler.transform(X_flat)
+		if not isinstance(images, list):
+			images = [images]
 
-		prob = self.clf.predict_proba(X_scaled)
-		prob = prob.reshape(H, W, -1)  # Reshape to (H, W, num_classes)
-		return prob
+		probs = []
+		for image in tqdm(images, desc="Predicting probabilities", unit="image", total=len(images)):
+			features = self._compute_features(image)
+			H, W, N = features.shape
+			X_flat = features.reshape(-1, N)
+			X_scaled = self.scaler.transform(X_flat)
+			prob = self.clf.predict_proba(X_scaled)
+			prob = prob.reshape(H, W, -1)
+			probs.append(prob)
 
-	def predict(self, image):
+		return probs if len(probs) > 1 else probs[0]
+
+	def predict(self, images):
 		"""
-		Predict the most likely class for each pixel in the image.
+		Predict the most likely class for each pixel in each image.
 
 		Parameters
 		----------
-		image : np.ndarray
-		    2D grayscale image.
+		images : list[np.ndarray]
+		    2D grayscale image or list of such images.
 
 		Returns
 		-------
-		2D array of predicted class labels with shape (H, W).
+		List of 2D predicted class label arrays.
 		"""
-		proba_image = self.predict_prob(image)
-		prediction = np.argmax(proba_image, axis=-1) + 1  # Classes start from 1
-		return prediction
+		probs = self.predict_prob(images)
+		if isinstance(probs, list):
+			return [np.argmax(p, axis=-1) + 1 for p in probs]
+		else:
+			return np.argmax(probs, axis=-1) + 1
