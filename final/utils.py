@@ -10,12 +10,19 @@ import pandas as pd
 from tqdm import tqdm
 from collections import defaultdict
 from prettytable import PrettyTable
+import tifffile
+from collections.abc import Iterable
+from skimage.filters.rank import windowed_histogram
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.preprocessing import StandardScaler
+from scipy.ndimage import gaussian_filter, gaussian_gradient_magnitude
 
 from liron_utils.files import copy
 from liron_utils.pure_python import dict_, NamedQueue
+from liron_utils.files import open_file
 from liron_utils import graphics as gr
 
-from __cfg__ import IMAGE_EXTENSIONS, CMAP, logger, EQUALIZE_ADAPTHIST_KW
+from __cfg__ import IMAGE_EXTENSIONS, CMAP, logger, EQUALIZE_ADAPTHIST_KW, SIGMAS, RANDOM_FOREST_CLASSIFIER_KW
 import tests
 
 
@@ -193,6 +200,7 @@ def flatten_image_tree(dir_root, dir_target=None, path_excel=None, overwrite=Fal
 		n_files += len(filenames)
 
 	logger.info(f"Finished copying {n_files} file{' links' if symlink else 's'} into {dir_target}.")
+	open_file(dir_target)  # Open the target directory in File Explorer
 
 
 class DataManager:
@@ -231,7 +239,7 @@ class DataManager:
 		for dir_cur, _, filenames in os.walk(dir_root, topdown=False):
 			for filename in filenames:
 				if is_image(filename):
-					rel_path = os.path.relpath(dir_cur, dir_root)
+					rel_path = os.path.relpath(dir_cur, os.path.join(dir_root, "data"))
 					if rel_path == ".":
 						rel_path = ""
 					filenames_images.append(os.path.join(rel_path, filename))
@@ -252,6 +260,8 @@ class DataManager:
 				raise ValueError(f"sample_size must be a non-negative float or bool (given {sample_size} instead).")
 
 			filenames_images = random.sample(filenames_images, min(sample_size, len(filenames_images)))
+		else:
+			filenames_images = natsorted(filenames_images)
 
 		self.num_samples = len(filenames_images)
 
@@ -261,7 +271,7 @@ class DataManager:
 		for idx, filename in enumerate(filenames_images):
 			basename = self.basenames[idx]
 
-			path_image = os.path.join(dir_root, filename)
+			path_image = os.path.join(dir_root, "data", filename)
 
 			# Try default label and probability paths
 			path_labels = os.path.join(dir_root, "labels", basename + ".tif")
@@ -294,7 +304,7 @@ class DataManager:
 			idx = self.paths[basename].idx
 		elif isinstance(idx, slice):
 			return [self[i] for i in range(self.num_samples)[idx]]
-		elif isinstance(idx, list):
+		elif isinstance(idx, Iterable):
 			return [self[i] for i in idx]
 		else:
 			raise TypeError(f"Index must be an integer or a string (given {type(idx)} instead).")
@@ -313,7 +323,7 @@ class DataManager:
 
 			labels, prob = None, None
 			if self.paths[basename].path_labels is not None:
-				labels = self.imread(self.paths[basename].path_labels)
+				labels = self.imread(self.paths[basename].path_labels).round().astype("uint8")
 
 			if self.paths[basename].path_prob is not None:
 				prob = np.load(self.paths[basename].path_prob)
@@ -323,7 +333,7 @@ class DataManager:
 
 			logger.debug(f"Image {idx}:{basename} loaded to cache. Cache size: {len(self.cache)}.")
 
-		return image, labels, prob
+		return basename, image, labels, prob
 
 	def has_labels(self, idx):
 		"""Check if the image has labels."""
@@ -333,7 +343,7 @@ class DataManager:
 			basename = idx
 		elif isinstance(idx, slice):
 			return [self.has_labels(i) for i in range(self.num_samples)[idx]]
-		elif type(idx) in [list, tuple, np.ndarray]:
+		elif isinstance(idx, Iterable):
 			return [self.has_labels(i) for i in idx]
 		else:
 			raise TypeError(f"Index must be an integer or a string (given {type(idx)} instead).")
@@ -348,7 +358,7 @@ class DataManager:
 			basename = idx
 		elif isinstance(idx, slice):
 			return [self.has_prob(i) for i in range(self.num_samples)[idx]]
-		elif type(idx) in [list, tuple, np.ndarray]:
+		elif isinstance(idx, Iterable):
 			return [self.has_prob(i) for i in idx]
 		else:
 			raise TypeError(f"Index must be an integer or a string (given {type(idx)} instead).")
@@ -368,12 +378,17 @@ class DataManager:
 		-------
 
 		"""
-		src = [os.path.join(self.dir_root, self.paths[basename].path_image) for basename in self.paths]
-		copy(src=src, dst=dir_target)
+
+		fields = ["path_image", "path_labels", "path_prob"]
+		dirs = ["data", "labels", "output"]
+		for field, dir in zip(fields, dirs):
+			src = [os.path.join(self.dir_root, self.paths[basename][field]) for basename in self.paths if
+				self.paths[basename][field] is not None]
+			copy(src=src, dst=os.path.join(dir_target, dir))
 
 	@staticmethod
 	def imread(filename):
-		image = plt.imread(filename)
+		image = tifffile.imread(filename)
 		image = skimage.exposure.equalize_adapthist(image, **EQUALIZE_ADAPTHIST_KW)
 		return image
 
@@ -407,7 +422,7 @@ class DataManager:
 		if "cmap" in kwargs:
 			raise ValueError("`cmap` keyword argument is not supported. Define `cmap` in the __cfg__ file instead.")
 
-		image, labels, prob = self[idx]
+		basename, image, labels, prob = self[idx]
 
 		WHICH_VALUES = ["image", "probabilities", "predictions", "image+probabilities"]
 		if isinstance(which, str):
@@ -462,3 +477,129 @@ class DataManager:
 					plot_probabilities(ax, prob, cmap=CMAP.rgba, **kwargs)
 
 		return axs
+
+
+class PixelClassifier:
+	def __init__(self, sigmas=SIGMAS, **random_forest_classifier_kw):
+		"""
+		A pixel classification model that mimics ilastik's Random Forest-based approach.
+
+		Features are extracted at multiple Gaussian scales, including:
+		- Gaussian smoothed intensity
+		- Gradient magnitude
+		- Local variance (as a proxy for texture)
+
+		The classifier is trained using user-provided annotations, and outputs per-pixel
+		class probabilities and segmentation maps.
+
+		Parameters
+		----------
+		sigmas : list[float], optional
+		    Standard deviations for Gaussian smoothing used in feature extraction.
+		"""
+		random_forest_classifier_kw = RANDOM_FOREST_CLASSIFIER_KW | random_forest_classifier_kw
+
+		self.sigmas = sigmas
+		self.clf = RandomForestClassifier(**random_forest_classifier_kw)
+		self.scaler = StandardScaler()
+		self.feature_names = []
+
+	def _compute_features(self, image):
+		"""
+        Extracts multiscale features from a 2D image.
+
+        Parameters
+        ----------
+        image : ndarray
+            Grayscale 2D image.
+
+        Returns
+        -------
+        feature_stack : ndarray
+            Array of shape (H, W, F) where F is the number of features per pixel.
+        """
+		features = []
+		self.feature_names = []
+
+		for sigma in self.sigmas:
+			# Gaussian smoothed intensity
+			gauss = gaussian_filter(image, sigma=sigma)
+			features.append(gauss)
+			self.feature_names.append(f'gaussian_{sigma}')
+
+			# Gradient magnitude
+			grad_mag = gaussian_gradient_magnitude(input=image, sigma=sigma)
+			features.append(grad_mag)
+			self.feature_names.append(f'gradient_magnitude_{sigma}')
+
+			# Texture (Local binary pattern)
+			# Note: LBP is typically applied to 2D grayscale images
+			# For simplicity, we'll use a basic texture measure: variance in a window
+			size = int(2 * np.ceil(3 * sigma) + 1)
+			local_var = windowed_histogram(image=image.astype(np.uint8), footprint=np.ones((size, size)))
+			features.append(local_var)
+			self.feature_names.append(f'local_variance_{sigma}')
+
+		# Stack features into a (H, W, F) array
+		feature_stack = np.stack(features, axis=-1)
+		return feature_stack
+
+	def fit(self, image, labels):
+		"""
+		Train the Random Forest classifier using labeled pixels in the image.
+
+		Parameters
+		----------
+		image : np.ndarray
+		    2D grayscale image.
+		labels : np.ndarray
+		    2D label mask of the same shape as `image`. Unlabeled pixels should have value 0.
+		"""
+		feature_stack = self._compute_features(image)
+		X = feature_stack[labels > 0]
+		y = labels[labels > 0]
+
+		# Flatten features and scale
+		X_flat = X.reshape(-1, X.shape[-1])
+		X_scaled = self.scaler.fit_transform(X_flat)
+
+		self.clf.fit(X_scaled, y)
+
+	def predict_prob(self, image):
+		"""
+		Predict class probabilities for each pixel in the image.
+
+		Parameters
+		----------
+		image : np.ndarray
+		    2D grayscale image.
+
+		Returns
+		-------
+		A 3D array of shape (H, W, C) where C is the number of classes.
+		"""
+		feature_stack = self._compute_features(image)
+		H, W, N = feature_stack.shape
+		X_flat = feature_stack.reshape(-1, N)
+		X_scaled = self.scaler.transform(X_flat)
+
+		prob = self.clf.predict_proba(X_scaled)
+		prob = prob.reshape(H, W, -1)  # Reshape to (H, W, num_classes)
+		return prob
+
+	def predict(self, image):
+		"""
+		Predict the most likely class for each pixel in the image.
+
+		Parameters
+		----------
+		image : np.ndarray
+		    2D grayscale image.
+
+		Returns
+		-------
+		2D array of predicted class labels with shape (H, W).
+		"""
+		proba_image = self.predict_prob(image)
+		prediction = np.argmax(proba_image, axis=-1) + 1  # Classes start from 1
+		return prediction
