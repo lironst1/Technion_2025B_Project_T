@@ -6,7 +6,7 @@ import tifffile
 from natsort import natsorted
 from tqdm import tqdm
 
-from __cfg__ import IMAGE_EXTENSIONS, ILASTIK_PROBS_EXTENSION, CMAP, logger, EQUALIZE_ADAPTHIST_KW
+from __cfg__ import IMAGE_EXTENSIONS, CMAP, logger, EQUALIZE_ADAPTHIST_KW
 from utils import is_image
 
 # viewer.layers["Labels"].data.shape

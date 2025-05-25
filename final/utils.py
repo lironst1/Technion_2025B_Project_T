@@ -15,7 +15,7 @@ from liron_utils.files import copy
 from liron_utils.pure_python import dict_, NamedQueue
 from liron_utils import graphics as gr
 
-from __cfg__ import IMAGE_EXTENSIONS, ILASTIK_PROBS_EXTENSION, CMAP, logger, EQUALIZE_ADAPTHIST_KW
+from __cfg__ import IMAGE_EXTENSIONS, CMAP, logger, EQUALIZE_ADAPTHIST_KW
 import tests
 
 
@@ -107,11 +107,11 @@ def flatten_image_tree(dir_root, dir_target=None, path_excel=None, overwrite=Fal
     │   │   ├── image2.png
 
     └── dir_target
-    │   ├── ABC__abc__image1.png
-    │   ├── ABC__image1.png
-    │   ├── ABC__image2.png
-    │   ├── DEF__image1.png
-    │   ├── DEF__image2.png
+    │   ├── ABC__abc__image1.png.lnk
+    │   ├── ABC__image1.png.lnk
+    │   ├── ABC__image2.png.lnk
+    │   ├── DEF__image1.png.lnk
+    │   ├── DEF__image2.png.lnk
 
 	Examples
 	--------

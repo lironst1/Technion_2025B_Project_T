@@ -3,18 +3,18 @@ from matplotlib.colors import ListedColormap
 
 from liron_utils import graphics as gr
 from liron_utils.pure_python import Logger
-from liron_utils.pure_python import dict_
+from liron_utils.pure_python import dict_, ispc
 
 # gr.update_rcParams("liron_utils-article")
 
 # %% Constants
-PATH_DATA = r"C:\Users\liron\OneDrive - Technion\Homework\2025B\114252 - Project T\Data"  # Path to the data directory
+PATH_DATA = r"C:\Users\liron\OneDrive - Technion\Homework\2025B\114252 - Project T\Data" if ispc \
+	else "/Users/lironst/Library/CloudStorage/OneDrive-Technion/Homework/2025B/114252 - Project T/Data"  # Path to the data directory
 rel_path = lambda *args: os.path.join(PATH_DATA, *args)
 IMAGE_EXTENSIONS = ['.jpg', '.jpeg', '.png', '.bmp', '.gif', '.tif', '.tiff']
 
 # Ilastik
 PATH_ILASTIK_EXE = r"C:\Program Files\ilastik-1.4.1rc2-gpu\ilastik.exe"  # Path to the Ilastik's 'run_ilastik.bat' script used for headless processing
-ILASTIK_PROBS_EXTENSION = '_Probabilities_.npy'
 
 # Napari
 
@@ -46,4 +46,4 @@ def check_inputs():
 		raise ValueError(f"Ilastik executable not found at {PATH_ILASTIK_EXE}")
 
 
-check_inputs()
+# check_inputs()
