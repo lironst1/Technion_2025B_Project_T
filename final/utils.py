@@ -261,19 +261,22 @@ class DataManager:
 		for idx, filename in enumerate(filenames_images):
 			basename = self.basenames[idx]
 
-			path_asoc_data = None
-			tmp = os.path.join(dir_root, basename + ILASTIK_PROBS_EXTENSION)
-			if os.path.exists(tmp):
-				path_asoc_data = tmp
-			tmp = os.path.join(dir_root, os.path.dirname(basename), "output",
-					os.path.split(basename)[1] + ILASTIK_PROBS_EXTENSION)
-			if os.path.exists(tmp):
-				path_asoc_data = tmp
+			path_image = os.path.join(dir_root, filename)
+
+			# Try default label and probability paths
+			path_labels = os.path.join(dir_root, "labels", basename + ".tif")
+			if not os.path.exists(path_labels):
+				path_labels = None
+
+			path_prob = os.path.join(dir_root, "output", basename + ".npy")
+			if not os.path.exists(path_prob):
+				path_prob = None
 
 			self.paths[basename] = dict_(
 					idx=idx,
-					path_image=os.path.join(dir_root, filename),
-					path_asoc_data=path_asoc_data,
+					path_image=path_image,
+					path_labels=path_labels,
+					path_prob=path_prob,
 			)
 
 		# Cache filename -> (image, data)
@@ -301,36 +304,56 @@ class DataManager:
 
 		if basename in self.cache:  # Check if the image is already in memory
 			data = self.cache[basename]
-			image = data.image
-			asoc_data = data.asoc_data
+			image, labels, prob = data.image, data.labels, data.prob
+
 			logger.debug(f"Image {idx}:{basename} loaded from cache. Cache size: {len(self.cache)}.")
 
 		else:  # Load the image and associated data
 			image = self.imread(self.paths[basename].path_image)
-			if self.paths[basename].path_asoc_data is None:
-				asoc_data = None
-			else:
-				asoc_data = np.load(self.paths[basename].path_asoc_data)
-			data = dict_(image=image, asoc_data=asoc_data)
+
+			labels, prob = None, None
+			if self.paths[basename].path_labels is not None:
+				labels = self.imread(self.paths[basename].path_labels)
+
+			if self.paths[basename].path_prob is not None:
+				prob = np.load(self.paths[basename].path_prob)
+
+			data = dict_(image=image, labels=labels, prob=prob)
 			self.cache.enqueue(name=basename, item=data)
+
 			logger.debug(f"Image {idx}:{basename} loaded to cache. Cache size: {len(self.cache)}.")
 
-		return image, asoc_data
+		return image, labels, prob
 
-	def has_asoc_data(self, idx):
-		"""Check if the image has associated data."""
+	def has_labels(self, idx):
+		"""Check if the image has labels."""
 		if isinstance(idx, int):
 			basename = self.basenames[idx]
 		elif isinstance(idx, str):
 			basename = idx
 		elif isinstance(idx, slice):
-			return [self.has_asoc_data(i) for i in range(self.num_samples)[idx]]
+			return [self.has_labels(i) for i in range(self.num_samples)[idx]]
 		elif type(idx) in [list, tuple, np.ndarray]:
-			return [self.has_asoc_data(i) for i in idx]
+			return [self.has_labels(i) for i in idx]
 		else:
 			raise TypeError(f"Index must be an integer or a string (given {type(idx)} instead).")
 
-		return self.paths[basename].path_asoc_data is not None
+		return self.paths[basename].path_labels is not None
+
+	def has_prob(self, idx):
+		"""Check if the image has associated probabilities."""
+		if isinstance(idx, int):
+			basename = self.basenames[idx]
+		elif isinstance(idx, str):
+			basename = idx
+		elif isinstance(idx, slice):
+			return [self.has_prob(i) for i in range(self.num_samples)[idx]]
+		elif type(idx) in [list, tuple, np.ndarray]:
+			return [self.has_prob(i) for i in idx]
+		else:
+			raise TypeError(f"Index must be an integer or a string (given {type(idx)} instead).")
+
+		return self.paths[basename].path_prob is not None
 
 	def copy_images(self, dir_target):
 		"""
@@ -384,8 +407,7 @@ class DataManager:
 		if "cmap" in kwargs:
 			raise ValueError("`cmap` keyword argument is not supported. Define `cmap` in the __cfg__ file instead.")
 
-		image, asoc_data = self[idx]
-		prob = asoc_data
+		image, labels, prob = self[idx]
 
 		WHICH_VALUES = ["image", "probabilities", "predictions", "image+probabilities"]
 		if isinstance(which, str):
