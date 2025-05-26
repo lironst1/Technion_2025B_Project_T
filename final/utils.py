@@ -319,7 +319,9 @@ class PixelClassifier:
 			X_flat = features.reshape(-1, N)
 			X_scaled = self.scaler.transform(X_flat)
 			prob = self.clf.predict_proba(X_scaled)
-			prob = prob.reshape(H, W, -1)  # todo: shape is incorrect
+			# todo: shape is incorrect. Make sure labels are read correctly and that all labels are used for training
+			raise NotImplementedError("The shape of the output probabilities is incorrect. ")
+			prob = prob.reshape(H, W, self.clf.n_classes_)
 			probs.append(prob)
 
 		return probs if len(probs) > 1 else probs[0]
