@@ -1,21 +1,20 @@
 import os
-import warnings
 import random
-import shutil
 from natsort import natsorted
-import numpy as np
-import skimage
-from matplotlib.axes import Axes
-import matplotlib.pyplot as plt
-import pandas as pd
-from tqdm import tqdm
 from collections import defaultdict
 from prettytable import PrettyTable
+import pickle as pkl
+from tqdm import tqdm
+import numpy as np
+import pandas as pd
 import tifffile
+from matplotlib.axes import Axes
+import matplotlib.pyplot as plt
 from collections.abc import Iterable
-from skimage.filters.rank import windowed_histogram
+from skimage.exposure import equalize_adapthist
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.preprocessing import StandardScaler
+from skimage.filters.rank import windowed_histogram
 from scipy.ndimage import gaussian_filter, gaussian_gradient_magnitude
 
 from liron_utils.files import copy
@@ -23,8 +22,8 @@ from liron_utils.pure_python import dict_, NamedQueue
 from liron_utils.files import open_file
 from liron_utils import graphics as gr
 
-from __cfg__ import IMAGE_EXTENSIONS, CMAP, logger, EQUALIZE_ADAPTHIST_KW, SIGMAS, RANDOM_FOREST_CLASSIFIER_KW, \
-	HIST_EQUALIZE
+from __cfg__ import IMAGE_EXTENSIONS, PATH_DATA, get_path, HIST_EQUALIZE, SIGMAS, RANDOM_FOREST_CLASSIFIER_KW, \
+	PATH_ILASTIK_EXE, set_props_kw_image, EQUALIZE_ADAPTHIST_KW, CMAP, logger
 import tests
 
 
@@ -39,14 +38,12 @@ def is_image(filename):
 
 def print_image_tree(dir_root):
 	"""
-    Print the directory tree under `all_dir`, showing the number of images and labels in each logical group.
+    Print the directory tree under `dir_root`, showing the number of images and labels in each logical group.
 
     Parameters
     ----------
-    all_dir : str or Path
-        Path to the parent directory containing 'data' and 'labels' subdirectories.
-    image_exts : tuple
-        Allowed image file extensions.
+    dir_root :      str or Path
+        Path to the parent directory containing 'data', 'labels' and 'output' subdirectories.
     """
 	dir_data = os.path.join(dir_root, "data")
 	dir_labels = os.path.join(dir_root, "labels")
@@ -205,8 +202,150 @@ def flatten_image_tree(dir_root, dir_target=None, path_excel=None, overwrite=Fal
 	open_file(dir_target)  # Open the target directory in File Explorer
 
 
+class PixelClassifier:
+	def __init__(self, sigmas=SIGMAS, **random_forest_classifier_kw):
+		"""
+		A pixel classification model that mimics ilastik's Random Forest-based approach.
+
+		Features are extracted at multiple Gaussian scales, including:
+		- Gaussian smoothed intensity
+		- Gradient magnitude
+		- Local variance (as a proxy for texture)
+
+		The classifier is trained using user-provided annotations, and outputs per-pixel
+		class probabilities and segmentation maps.
+
+		Parameters
+		----------
+		sigmas : list[float], optional
+		    Standard deviations for Gaussian smoothing used in feature extraction.
+		"""
+		random_forest_classifier_kw = RANDOM_FOREST_CLASSIFIER_KW | random_forest_classifier_kw
+
+		self.sigmas = sigmas
+		self.clf = RandomForestClassifier(**random_forest_classifier_kw)
+		self.scaler = StandardScaler()
+		self.feature_names = []
+
+	def _compute_features(self, image):
+		"""
+        Extracts multiscale features from a 2D image.
+
+        Parameters
+        ----------
+        image : ndarray
+            Grayscale 2D image.
+
+        Returns
+        -------
+        feature_stack : ndarray
+            Array of shape (H, W, F) where F is the number of features per pixel.
+        """
+		features = []
+		self.feature_names = []
+
+		for sigma in self.sigmas:
+			# Gaussian smoothed intensity
+			gauss = gaussian_filter(image, sigma=sigma)
+			features.append(gauss)
+			self.feature_names.append(f'gaussian_{sigma}')
+
+			# Gradient magnitude
+			grad_mag = gaussian_gradient_magnitude(input=image, sigma=sigma)
+			features.append(grad_mag)
+			self.feature_names.append(f'gradient_magnitude_{sigma}')
+
+		# Texture (Local binary pattern)
+		# Note: LBP is typically applied to 2D grayscale images
+		# For simplicity, we'll use a basic texture measure: variance in a window
+		# size = int(2 * np.ceil(3 * sigma) + 1)
+		# local_var = windowed_histogram(image=image.astype(np.uint8), footprint=np.ones((size, size)))
+		# features.append(local_var)
+		# self.feature_names.append(f'local_variance_{sigma}')
+
+		# Stack features into a (H, W, F) array
+		feature_stack = np.stack(features, axis=-1)
+		return feature_stack
+
+	def fit(self, images, labels):
+		"""
+		Train the classifier using multiple images and corresponding label masks.
+
+		Parameters
+		----------
+		images : list[np.ndarray]
+		    List of 2D grayscale images.
+		labels : list[np.ndarray]
+		    List of 2D label masks. Unlabeled pixels should have value 0.
+		"""
+		if not isinstance(images, list):
+			images = [images]
+			labels = [labels]
+
+		X_all, y_all = [], []
+		for image, label in tqdm(zip(images, labels), desc="Training PixelClassifier", unit="image", total=len(images)):
+			features = self._compute_features(image)
+			X = features[label > 0]
+			y = label[label > 0]
+			X_all.append(X)
+			y_all.append(y)
+
+		X_concat = np.concatenate(X_all, axis=0)
+		y_concat = np.concatenate(y_all, axis=0)
+
+		X_scaled = self.scaler.fit_transform(X_concat)
+		self.clf.fit(X_scaled, y_concat)
+
+	def predict_prob(self, images):
+		"""
+		Predict class probabilities for each pixel in each image.
+
+		Parameters
+		----------
+		images : list[np.ndarray]
+		    2D grayscale image or list of such images.
+
+		Returns
+		-------
+		List of 3D arrays, each of shape (H, W, C).
+		"""
+		if not isinstance(images, list):
+			images = [images]
+
+		probs = []
+		for image in tqdm(images, desc="Predicting probabilities", unit="image", total=len(images)):
+			features = self._compute_features(image)
+			H, W, N = features.shape
+			X_flat = features.reshape(-1, N)
+			X_scaled = self.scaler.transform(X_flat)
+			prob = self.clf.predict_proba(X_scaled)
+			prob = prob.reshape(H, W, -1)
+			probs.append(prob)
+
+		return probs if len(probs) > 1 else probs[0]
+
+	def predict(self, images):
+		"""
+		Predict the most likely class for each pixel in each image.
+
+		Parameters
+		----------
+		images : list[np.ndarray]
+		    2D grayscale image or list of such images.
+
+		Returns
+		-------
+		List of 2D predicted class label arrays.
+		"""
+		probs = self.predict_prob(images)
+		if isinstance(probs, list):
+			return [np.argmax(p, axis=-1) + 1 for p in probs]
+		else:
+			return np.argmax(probs, axis=-1) + 1
+
+
 class DataManager:
-	def __init__(self, dir_root, sample_size=None, n_max_in_memory=10, labeled=None):
+	def __init__(self, dir_root, sample_size=None, cache_size=10, labeled=None, pixel_classifier=None):
 		"""
 		Data manager for loading images and associated data.
 		
@@ -222,20 +361,23 @@ class DataManager:
 			│   ├── labels
 			│   │   ├── 2025_01_29__View1__Max_C1__1_beta_cat_25x_10min_T2_C1.tif
 			│   │   ├── ...
-			│   ├── outputs (pixel classifier outputs)
+			│   ├── output (pixel classifier outputs)
 			│   │   ├── 2025_01_29__View1__Max_C1__1_beta_cat_25x_10min_T2_C1_Probabilities_.npy
 			│   │   ├── ...
 		sample_size :           int, float, or bool, optional
 			Number of images to randomly sample from the directory.
 			If given in the range (0, 1], it is interpreted as a fraction (True is the same as 1, i.e., use all data in
 			random order. False will use all data in the order discovered by os.path.walk). If None, all images are used.
-		n_max_in_memory :       int, optional
+		cache_size :            int, optional
 			Maximum number of images to keep in memory at once. If exceeded, the oldest image will be removed from
 			memory. Default is 5.
 		labeled :               bool or None, optional
 			If True, only labeled images will be loaded.
 			If False, only unlabeled images will be loaded.
 			If None, both labeled and unlabeled images will be loaded.
+		pixel_classifier :      PixelClassifier, optional
+			Path to pixel classifier .pkl file or the object itself.
+			If None, a new pixel classifier will be created.
 		"""
 		tests.dir_exist(dir_root)
 		self.dir_root = dir_root
@@ -302,13 +444,27 @@ class DataManager:
 			)
 
 		# Cache basename -> data
-		self.cache = NamedQueue(max_size=n_max_in_memory)
+		self.cache = NamedQueue(max_size=cache_size)
+
+		# Pixel classifier
+		if pixel_classifier is None:
+			self.pixel_classifier: PixelClassifier = PixelClassifier()
+			logger.info(f"Creating new pixel classifier.")
+		elif isinstance(pixel_classifier, PixelClassifier):
+			self.pixel_classifier = pixel_classifier
+		elif isinstance(pixel_classifier, str):
+			if not os.path.exists(pixel_classifier):
+				raise ValueError(f"Pixel classifier file {pixel_classifier} does not exist.")
+			with open(pixel_classifier, "rb") as file:
+				self.pixel_classifier = pkl.load(file)
+				logger.info(f"Loaded pixel classifier from {pixel_classifier}.")
 
 	def __len__(self):
 		return self.num_samples
 
 	def __getitem__(self, idx):
 		"""Get the image and associated data for a given index."""
+
 		if isinstance(idx, int):
 			basename = self.basenames[idx]
 		elif isinstance(idx, str):
@@ -407,10 +563,69 @@ class DataManager:
 	def imread(filename, hist_equalize=False):
 		image = tifffile.imread(filename)
 		if hist_equalize:
-			image = skimage.exposure.equalize_adapthist(image, **EQUALIZE_ADAPTHIST_KW)
+			image = equalize_adapthist(image, **EQUALIZE_ADAPTHIST_KW)
 		return image
 
-	def plot(self, idx, prob=None, axs=None, which="all", **kwargs):
+	def fit(self, idx=None):
+		if idx is None:
+			idx = [i for i in range(self.num_samples) if self.has_labels(i)]
+
+		if isinstance(idx, str):
+			basename = idx
+			idx = self.paths[basename].idx
+		elif isinstance(idx, slice):
+			return [self.fit(i) for i in range(self.num_samples)[idx]]
+		elif isinstance(idx, Iterable):
+			return [self.fit(i) for i in idx]
+		else:
+			raise TypeError(f"Index must be an integer or a string (given {type(idx)} instead).")
+
+		if not self.has_labels(idx):
+			raise IndexError(f"Index {idx} is not labeled.")
+
+		data = self[idx]
+		self.pixel_classifier.fit(images=data.image, labels=data.labels)
+		return None
+
+	def save_pixel_classifier(self, filename=get_path("pixel_classifier.pkl")):
+		"""Save the pixel classifier to a file."""
+		with open(filename, "wb") as f:
+			pkl.dump(self.pixel_classifier, f)
+		logger.info(f"Pixel classifier saved to {filename}.")
+		return filename
+
+	def predict(self, idx=None, plot=False, **plot_kwargs):
+		if idx is None:
+			idx = range(self.num_samples)
+		if isinstance(idx, str):
+			basename = idx
+			idx = self.paths[basename].idx
+		elif isinstance(idx, slice):
+			return [self.predict(i) for i in range(self.num_samples)[idx]]
+		elif isinstance(idx, Iterable):
+			return [self.predict(i) for i in idx]
+		else:
+			raise TypeError(f"Index must be an integer or a string (given {type(idx)} instead).")
+
+		data = self[idx]
+		image = data.image
+		data.prob = self.pixel_classifier.predict_prob(images=image)
+
+		# save probabilities to file
+		filename = os.path.join(self.dir_root, "output", basename + ".tif")
+		tifffile.imwrite(filename, data.prob)
+		logger.debug(f"Probabilities saved to {filename}.")
+
+		# update class
+		self.paths[basename].path_prob = filename
+		self.cache.update(name=basename, item=data)
+
+		if plot:
+			self.plot(idx, **plot_kwargs)
+
+		return data.prob
+
+	def plot(self, idx, axs=None, which="all", save_fig=False, **kwargs):
 		"""
 		Plot predictions.
 
@@ -441,10 +656,7 @@ class DataManager:
 			raise ValueError("`cmap` keyword argument is not supported. Define `cmap` in the __cfg__ file instead.")
 
 		data = self[idx]
-		basename, image, labels, prob_tmp = data.basenames, data.image, data.labels, data.prob
-
-		if prob is None:
-			prob = prob_tmp
+		basename, image, labels, prob = data.basename, data.image, data.labels, data.prob
 
 		WHICH_VALUES = ["image", "probabilities", "predictions", "image+probabilities"]
 		if isinstance(which, str):
@@ -502,146 +714,12 @@ class DataManager:
 					plot_probabilities(ax, prob, cmap=CMAP.rgba, **kwargs)
 					ax.set_title("Image + Probabilities")
 
+		Ax = gr.Axes(axs=axs)
+		kwargs = dict(
+				sup_title=f"{basename}",
+				show_fig=not save_fig,
+				save_file_name=get_path("output", basename) if save_fig else False,
+		) | set_props_kw_image
+		Ax.set_props(**kwargs)
+
 		return axs
-
-
-class PixelClassifier:
-	def __init__(self, sigmas=SIGMAS, **random_forest_classifier_kw):
-		"""
-		A pixel classification model that mimics ilastik's Random Forest-based approach.
-
-		Features are extracted at multiple Gaussian scales, including:
-		- Gaussian smoothed intensity
-		- Gradient magnitude
-		- Local variance (as a proxy for texture)
-
-		The classifier is trained using user-provided annotations, and outputs per-pixel
-		class probabilities and segmentation maps.
-
-		Parameters
-		----------
-		sigmas : list[float], optional
-		    Standard deviations for Gaussian smoothing used in feature extraction.
-		"""
-		random_forest_classifier_kw = RANDOM_FOREST_CLASSIFIER_KW | random_forest_classifier_kw
-
-		self.sigmas = sigmas
-		self.clf = RandomForestClassifier(**random_forest_classifier_kw)
-		self.scaler = StandardScaler()
-		self.feature_names = []
-
-	def _compute_features(self, image):
-		"""
-        Extracts multiscale features from a 2D image.
-
-        Parameters
-        ----------
-        image : ndarray
-            Grayscale 2D image.
-
-        Returns
-        -------
-        feature_stack : ndarray
-            Array of shape (H, W, F) where F is the number of features per pixel.
-        """
-		features = []
-		self.feature_names = []
-
-		for sigma in self.sigmas:
-			# Gaussian smoothed intensity
-			gauss = gaussian_filter(image, sigma=sigma)
-			features.append(gauss)
-			self.feature_names.append(f'gaussian_{sigma}')
-
-			# Gradient magnitude
-			grad_mag = gaussian_gradient_magnitude(input=image, sigma=sigma)
-			features.append(grad_mag)
-			self.feature_names.append(f'gradient_magnitude_{sigma}')
-
-			# Texture (Local binary pattern)
-			# Note: LBP is typically applied to 2D grayscale images
-			# For simplicity, we'll use a basic texture measure: variance in a window
-		# size = int(2 * np.ceil(3 * sigma) + 1)
-		# local_var = windowed_histogram(image=image.astype(np.uint8), footprint=np.ones((size, size)))
-		# features.append(local_var)
-		# self.feature_names.append(f'local_variance_{sigma}')
-
-		# Stack features into a (H, W, F) array
-		feature_stack = np.stack(features, axis=-1)
-		return feature_stack
-
-	def fit(self, images, labels):
-		"""
-		Train the classifier using multiple images and corresponding label masks.
-
-		Parameters
-		----------
-		images : list[np.ndarray]
-		    List of 2D grayscale images.
-		labels : list[np.ndarray]
-		    List of 2D label masks. Unlabeled pixels should have value 0.
-		"""
-		if not isinstance(images, list):
-			images = [images]
-			labels = [labels]
-
-		X_all, y_all = [], []
-		for image, label in tqdm(zip(images, labels), desc="Training PixelClassifier", unit="image", total=len(images)):
-			features = self._compute_features(image)
-			X = features[label > 0]
-			y = label[label > 0]
-			X_all.append(X)
-			y_all.append(y)
-
-		X_concat = np.concatenate(X_all, axis=0)
-		y_concat = np.concatenate(y_all, axis=0)
-
-		X_scaled = self.scaler.fit_transform(X_concat)
-		self.clf.fit(X_scaled, y_concat)
-
-	def predict_prob(self, images):
-		"""
-		Predict class probabilities for each pixel in each image.
-
-		Parameters
-		----------
-		images : list[np.ndarray]
-		    2D grayscale image or list of such images.
-
-		Returns
-		-------
-		List of 3D arrays, each of shape (H, W, C).
-		"""
-		if not isinstance(images, list):
-			images = [images]
-
-		probs = []
-		for image in tqdm(images, desc="Predicting probabilities", unit="image", total=len(images)):
-			features = self._compute_features(image)
-			H, W, N = features.shape
-			X_flat = features.reshape(-1, N)
-			X_scaled = self.scaler.transform(X_flat)
-			prob = self.clf.predict_proba(X_scaled)
-			prob = prob.reshape(H, W, -1)
-			probs.append(prob)
-
-		return probs if len(probs) > 1 else probs[0]
-
-	def predict(self, images):
-		"""
-		Predict the most likely class for each pixel in each image.
-
-		Parameters
-		----------
-		images : list[np.ndarray]
-		    2D grayscale image or list of such images.
-
-		Returns
-		-------
-		List of 2D predicted class label arrays.
-		"""
-		probs = self.predict_prob(images)
-		if isinstance(probs, list):
-			return [np.argmax(p, axis=-1) + 1 for p in probs]
-		else:
-			return np.argmax(probs, axis=-1) + 1

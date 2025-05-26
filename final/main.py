@@ -1,12 +1,13 @@
 import os
+import pickle as pkl
 from tqdm import tqdm
 import numpy as np
 import matplotlib.pyplot as plt
-import pickle as pkl
 
 from liron_utils import graphics as gr
 
-from __cfg__ import logger, set_props_kw_image, rel_path
+from __cfg__ import IMAGE_EXTENSIONS, PATH_DATA, get_path, HIST_EQUALIZE, SIGMAS, RANDOM_FOREST_CLASSIFIER_KW, \
+	PATH_ILASTIK_EXE, set_props_kw_image, EQUALIZE_ADAPTHIST_KW, CMAP, logger
 from utils import flatten_image_tree, DataManager, print_image_tree, PixelClassifier
 from utils_napari import split_labels_tif
 
@@ -17,43 +18,17 @@ from utils_napari import split_labels_tif
 # )
 # print_image_tree(rel_path("all_head"))
 
+dm = DataManager(dir_root=get_path("all_head"))
+dm.fit()
+file_pkl = dm.save_pixel_classifier()
 
-file_pkl = rel_path("pixel_classifier.pkl")
-if os.path.exists(file_pkl):
-	logger.info(f"Loading pixel classifier from {file_pkl}")
-	with open(file_pkl, "rb") as f:
-		pc = pkl.load(f)
-
-else:  # train
-	logger.info(f"Pixel classifier not found at {file_pkl}, creating a new one.")
-	dm = DataManager(
-			dir_root=rel_path("all_head"),
-			sample_size=None,
-			labeled=True
-	)
-	data = dm[:]
-	images = [data[i].image for i in range(len(data))]
-	labels = [data[i].labels for i in range(len(data))]
-	pc = PixelClassifier()
-	pc.fit(images=images, labels=labels)
-	with open(file_pkl, "wb") as f:
-		pkl.dump(pc, f)
-
-# test
 dm = DataManager(
-		dir_root=rel_path("all_head"),
+		dir_root=get_path("all_head"),
 		sample_size=10,
-		labeled=False
+		labeled=False,
+		pixel_classifier=file_pkl
 )
-data = dm[:]
-images = [data[i].image for i in range(len(data))]
-labels = [data[i].labels for i in range(len(data))]
-prob = pc.predict_prob(images=images)
-
-for idx in range(len(dm)):
-	axs = dm.plot(idx, prob=prob[idx])
-	Ax = gr.Axes(axs=axs)
-	Ax.set_props(**set_props_kw_image)
+dm.predict(plot=True)
 
 # run_ilastik(path_project=rel_path("MyProject.ilp"), dir_root=rel_path("train"))
 

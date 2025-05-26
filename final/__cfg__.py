@@ -9,10 +9,10 @@ from liron_utils.pure_python import dict_, ispc
 # gr.update_rcParams("liron_utils-article")
 
 # %% Constants
+IMAGE_EXTENSIONS = ['.jpg', '.jpeg', '.png', '.bmp', '.gif', '.tif', '.tiff']
 PATH_DATA = r"C:\Users\liron\OneDrive - Technion\Homework\2025B\114252 - Project T\Data" if ispc \
 	else "/Users/lironst/Library/CloudStorage/OneDrive-Technion/Homework/2025B/114252 - Project T/Data"  # Path to the data directory
-rel_path = lambda *args: os.path.join(PATH_DATA, *args)
-IMAGE_EXTENSIONS = ['.jpg', '.jpeg', '.png', '.bmp', '.gif', '.tif', '.tiff']
+get_path = lambda *args: os.path.join(PATH_DATA, *args)
 
 # %% Data Manager
 HIST_EQUALIZE = True
