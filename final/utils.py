@@ -19,7 +19,7 @@ from scipy.ndimage import gaussian_filter, gaussian_gradient_magnitude
 
 from liron_utils.files import copy
 from liron_utils.pure_python import dict_, NamedQueue
-from liron_utils.files import open_file
+from liron_utils.files import open_file, mkdirs
 from liron_utils import graphics as gr
 
 from __cfg__ import IMAGE_EXTENSIONS, PATH_DATA, get_path, HIST_EQUALIZE, SIGMAS, RANDOM_FOREST_CLASSIFIER_KW, \
@@ -319,7 +319,7 @@ class PixelClassifier:
 			X_flat = features.reshape(-1, N)
 			X_scaled = self.scaler.transform(X_flat)
 			prob = self.clf.predict_proba(X_scaled)
-			prob = prob.reshape(H, W, -1)
+			prob = prob.reshape(H, W, -1)  # todo: shape is incorrect
 			probs.append(prob)
 
 		return probs if len(probs) > 1 else probs[0]
@@ -570,7 +570,9 @@ class DataManager:
 		if idx is None:
 			idx = [i for i in range(self.num_samples) if self.has_labels(i)]
 
-		if isinstance(idx, str):
+		if isinstance(idx, int):
+			pass
+		elif isinstance(idx, str):
 			basename = idx
 			idx = self.paths[basename].idx
 		elif isinstance(idx, slice):
@@ -587,8 +589,10 @@ class DataManager:
 		self.pixel_classifier.fit(images=data.image, labels=data.labels)
 		return None
 
-	def save_pixel_classifier(self, filename=get_path("pixel_classifier.pkl")):
+	def save_pixel_classifier(self, filename=None):
 		"""Save the pixel classifier to a file."""
+		if filename is None:
+			filename = os.path.join(self.dir_root, "pixel_classifier.pkl")
 		with open(filename, "wb") as f:
 			pkl.dump(self.pixel_classifier, f)
 		logger.info(f"Pixel classifier saved to {filename}.")
@@ -597,22 +601,26 @@ class DataManager:
 	def predict(self, idx=None, plot=False, **plot_kwargs):
 		if idx is None:
 			idx = range(self.num_samples)
-		if isinstance(idx, str):
+		if isinstance(idx, int):
+			pass
+		elif isinstance(idx, str):
 			basename = idx
 			idx = self.paths[basename].idx
 		elif isinstance(idx, slice):
-			return [self.predict(i) for i in range(self.num_samples)[idx]]
+			return [self.predict(idx=i, plot=plot, **plot_kwargs) for i in range(self.num_samples)[idx]]
 		elif isinstance(idx, Iterable):
-			return [self.predict(i) for i in idx]
+			return [self.predict(idx=i, plot=plot, **plot_kwargs) for i in idx]
 		else:
 			raise TypeError(f"Index must be an integer or a string (given {type(idx)} instead).")
 
+		basename = self.basenames[idx]
 		data = self[idx]
 		image = data.image
 		data.prob = self.pixel_classifier.predict_prob(images=image)
 
 		# save probabilities to file
 		filename = os.path.join(self.dir_root, "output", basename + ".tif")
+		mkdirs(os.path.dirname(filename))
 		tifffile.imwrite(filename, data.prob)
 		logger.debug(f"Probabilities saved to {filename}.")
 
@@ -718,7 +726,7 @@ class DataManager:
 		kwargs = dict(
 				sup_title=f"{basename}",
 				show_fig=not save_fig,
-				save_file_name=get_path("output", basename) if save_fig else False,
+				save_file_name=os.path.join(self.dir_root, "figs", basename) if save_fig else False,
 		) | set_props_kw_image
 		Ax.set_props(**kwargs)
 

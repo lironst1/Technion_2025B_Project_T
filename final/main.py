@@ -28,7 +28,7 @@ dm = DataManager(
 		labeled=False,
 		pixel_classifier=file_pkl
 )
-dm.predict(plot=True)
+dm.predict(plot=True, save_fig=True)
 
 # run_ilastik(path_project=rel_path("MyProject.ilp"), dir_root=rel_path("train"))
 
