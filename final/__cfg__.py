@@ -6,6 +6,7 @@ from liron_utils import graphics as gr
 from liron_utils.pure_python import Logger
 from liron_utils.pure_python import dict_, ispc
 
+gr.update_rcParams({"savefig.format": "png"})
 # gr.update_rcParams("liron_utils-article")
 
 # %% Constants

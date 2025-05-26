@@ -18,10 +18,11 @@ from utils_napari import split_labels_tif
 # )
 # print_image_tree(rel_path("all_head"))
 
-dm = DataManager(dir_root=get_path("all_head"))
-dm.fit()
-file_pkl = dm.save_pixel_classifier()
+# dm = DataManager(dir_root=get_path("all_head"))
+# dm.fit()
+# file_pkl = dm.save_pixel_classifier()
 
+file_pkl = os.path.join(get_path("all_head"), "pixel_classifier.pkl")
 dm = DataManager(
 		dir_root=get_path("all_head"),
 		sample_size=10,

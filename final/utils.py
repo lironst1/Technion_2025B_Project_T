@@ -285,8 +285,9 @@ class PixelClassifier:
 		X_all, y_all = [], []
 		for image, label in tqdm(zip(images, labels), desc="Training PixelClassifier", unit="image", total=len(images)):
 			features = self._compute_features(image)
-			X = features[label > 0]
-			y = label[label > 0]
+			is_labeled = (label > 0)
+			X = features[is_labeled]
+			y = label[is_labeled]
 			X_all.append(X)
 			y_all.append(y)
 
@@ -313,14 +314,12 @@ class PixelClassifier:
 			images = [images]
 
 		probs = []
-		for image in tqdm(images, desc="Predicting probabilities", unit="image", total=len(images)):
+		for image in images:
 			features = self._compute_features(image)
 			H, W, N = features.shape
 			X_flat = features.reshape(-1, N)
 			X_scaled = self.scaler.transform(X_flat)
 			prob = self.clf.predict_proba(X_scaled)
-			# todo: shape is incorrect. Make sure labels are read correctly and that all labels are used for training
-			raise NotImplementedError("The shape of the output probabilities is incorrect. ")
 			prob = prob.reshape(H, W, self.clf.n_classes_)
 			probs.append(prob)
 
@@ -377,7 +376,7 @@ class DataManager:
 			If True, only labeled images will be loaded.
 			If False, only unlabeled images will be loaded.
 			If None, both labeled and unlabeled images will be loaded.
-		pixel_classifier :      PixelClassifier, optional
+		pixel_classifier :      PixelClassifier or str, optional
 			Path to pixel classifier .pkl file or the object itself.
 			If None, a new pixel classifier will be created.
 		"""
@@ -568,27 +567,13 @@ class DataManager:
 			image = equalize_adapthist(image, **EQUALIZE_ADAPTHIST_KW)
 		return image
 
-	def fit(self, idx=None):
-		if idx is None:
-			idx = [i for i in range(self.num_samples) if self.has_labels(i)]
-
-		if isinstance(idx, int):
-			pass
-		elif isinstance(idx, str):
-			basename = idx
-			idx = self.paths[basename].idx
-		elif isinstance(idx, slice):
-			return [self.fit(i) for i in range(self.num_samples)[idx]]
-		elif isinstance(idx, Iterable):
-			return [self.fit(i) for i in idx]
-		else:
-			raise TypeError(f"Index must be an integer or a string (given {type(idx)} instead).")
-
-		if not self.has_labels(idx):
-			raise IndexError(f"Index {idx} is not labeled.")
+	def fit(self):
+		idx = [i for i in range(self.num_samples) if self.has_labels(i)]
 
 		data = self[idx]
-		self.pixel_classifier.fit(images=data.image, labels=data.labels)
+		images = [d.image for d in data]
+		labels = [d.labels for d in data]
+		self.pixel_classifier.fit(images=images, labels=labels)
 		return None
 
 	def save_pixel_classifier(self, filename=None):
@@ -601,6 +586,7 @@ class DataManager:
 		return filename
 
 	def predict(self, idx=None, plot=False, **plot_kwargs):
+		tqdm_kw = dict(desc="Predicting probabilities", unit="image")
 		if idx is None:
 			idx = range(self.num_samples)
 		if isinstance(idx, int):
@@ -609,9 +595,10 @@ class DataManager:
 			basename = idx
 			idx = self.paths[basename].idx
 		elif isinstance(idx, slice):
-			return [self.predict(idx=i, plot=plot, **plot_kwargs) for i in range(self.num_samples)[idx]]
+			return [self.predict(idx=i, plot=plot, **plot_kwargs) for i in
+				tqdm(range(self.num_samples)[idx], **tqdm_kw)]
 		elif isinstance(idx, Iterable):
-			return [self.predict(idx=i, plot=plot, **plot_kwargs) for i in idx]
+			return [self.predict(idx=i, plot=plot, **plot_kwargs) for i in tqdm(idx, **tqdm_kw)]
 		else:
 			raise TypeError(f"Index must be an integer or a string (given {type(idx)} instead).")
 
