@@ -1,9 +1,10 @@
 import os
 import random
+import warnings
 from natsort import natsorted
 from collections import defaultdict
 from prettytable import PrettyTable
-import pickle as pkl
+import pickle
 from tqdm import tqdm
 import numpy as np
 import pandas as pd
@@ -13,6 +14,7 @@ from matplotlib.axes import Axes
 import matplotlib.pyplot as plt
 from collections.abc import Iterable
 from skimage.exposure import equalize_adapthist
+from skimage.measure import regionprops
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.preprocessing import StandardScaler
 from scipy.ndimage import gaussian_filter, gaussian_gradient_magnitude
@@ -24,7 +26,7 @@ from liron_utils.files import open_file, mkdirs
 from liron_utils import graphics as gr
 
 from __cfg__ import logger, IMAGE_EXTENSIONS, PATH_DATA, get_path, AUTO_CONTRAST, SIGMAS, RANDOM_FOREST_CLASSIFIER_KW, \
-	PATH_ILASTIK_EXE, set_props_kw_image, LABELS, LABELS2IDX, CMAP
+	PATH_ILASTIK_EXE, set_props_kw_image, LABELS, LABELS2IDX, CMAP, DATA_TYPES
 import tests
 
 
@@ -219,7 +221,7 @@ def flatten_image_tree(dir_root, dir_target=None, path_excel=None, date=None, vi
 	open_file(dir_target)  # Open the target directory in File Explorer
 
 
-class PixelClassifier:
+class RandomForestPixelClassifier:
 	def __init__(self, sigmas=SIGMAS, **random_forest_classifier_kw):
 		"""
 		A pixel classification model that mimics ilastik's Random Forest-based approach.
@@ -363,7 +365,7 @@ class PixelClassifier:
 
 
 class DataManager:
-	def __init__(self, dir_root, sample_size=None, cache_size=20, labeled=None, pixel_classifier=None):
+	def __init__(self, dir_root, sample_size=None, cache_size=20, labeled=None, random_forest_pixel_classifier=None):
 		"""
 		Data manager for loading images and associated data.
 		
@@ -393,7 +395,7 @@ class DataManager:
 			If True, only labeled images will be loaded.
 			If False, only unlabeled images will be loaded.
 			If None, both labeled and unlabeled images will be loaded.
-		pixel_classifier :      PixelClassifier or str, optional
+		random_forest_pixel_classifier :      PixelClassifier or str, optional
 			Path to pixel classifier .pkl file or the object itself.
 			If None, a new pixel classifier will be created.
 		"""
@@ -437,45 +439,37 @@ class DataManager:
 
 		self.num_samples = len(filenames_images)
 
-		# Load all associated data
-		self.basenames = [os.path.splitext(f)[0] for f in filenames_images]
-		self.paths = dict_()  # {<basename>: {<idx>, <path_image>, <path_asoc_data>}}
+		# Get paths to images and associated data
+		self.basenames: list[str] = [os.path.splitext(f)[0] for f in filenames_images]
+
+		self.paths = dict_()  # {<basename>: {<idx>, <path_image>, <path_labels>, ...}}
 		for idx, filename in enumerate(filenames_images):
 			basename = self.basenames[idx]
 
-			path_image = os.path.join(dir_root, "data", filename)
-
-			# Try default label and probability paths
-			path_labels = os.path.join(dir_root, "labels", basename + ".tif")
-			if not os.path.exists(path_labels):
-				path_labels = None
-
-			path_prob = os.path.join(dir_root, "prob", basename + ".tif")
-			if not os.path.exists(path_prob):
-				path_prob = None
-
-			self.paths[basename] = dict_(
-					idx=idx,
-					path_image=path_image,
-					path_labels=path_labels,
-					path_prob=path_prob,
-			)
+			self.paths[basename] = dict_(idx=idx, **dict(zip(DATA_TYPES.keys(), len(DATA_TYPES) * [None])))
+			for data_type, d in DATA_TYPES.items():
+				path_data_type = os.path.join(dir_root, d.dirname, basename + d.ext)
+				if os.path.exists(path_data_type):
+					self.paths[basename][data_type] = path_data_type
 
 		# Cache basename -> data
 		self.cache = NamedQueue(max_size=cache_size)
 
 		# Pixel classifier
-		if pixel_classifier is None:
-			self.pixel_classifier: PixelClassifier = PixelClassifier()
+		if random_forest_pixel_classifier is None:
+			self.pixel_classifier: RandomForestPixelClassifier = RandomForestPixelClassifier()
 			logger.info(f"Creating new pixel classifier.")
-		elif isinstance(pixel_classifier, PixelClassifier):
-			self.pixel_classifier = pixel_classifier
-		elif isinstance(pixel_classifier, str):
-			if not os.path.exists(pixel_classifier):
-				raise ValueError(f"Pixel classifier file {pixel_classifier} does not exist.")
-			with open(pixel_classifier, "rb") as file:
-				self.pixel_classifier = pkl.load(file)
-				logger.info(f"Loaded pixel classifier from {pixel_classifier}.")
+		elif isinstance(random_forest_pixel_classifier, RandomForestPixelClassifier):
+			self.pixel_classifier = random_forest_pixel_classifier
+		elif isinstance(random_forest_pixel_classifier, str):
+			if not os.path.exists(random_forest_pixel_classifier):
+				raise ValueError(f"Pixel classifier file {random_forest_pixel_classifier} does not exist.")
+			with open(random_forest_pixel_classifier, "rb") as file:
+				self.pixel_classifier = pickle.load(file)
+				logger.info(f"Loaded pixel classifier from {random_forest_pixel_classifier}.")
+
+		# Cellpose Model
+		self.cellpose_model = None
 
 	def __len__(self):
 		return self.num_samples
@@ -484,7 +478,7 @@ class DataManager:
 	def _iterable_idx(tqdm_kw=None):
 		if tqdm_kw is None:
 			tqdm_kw = dict(disable=True)
-		tqdm_kw = dict(desc="Processing") | tqdm_kw  # default tqdm settings
+		tqdm_kw = dict(desc="Processing", delay=0.1) | tqdm_kw  # default tqdm settings
 
 		def decorator(func):
 
@@ -516,7 +510,11 @@ class DataManager:
 					tqdm_kw_ = dict(total=len(idx)) | tqdm_kw
 					logger.info(f'{tqdm_kw_["desc"]} (total={tqdm_kw_["total"]})...')
 
-					out = [func(self, i, *args, **kwargs) for i in tqdm(idx, **tqdm_kw_)]
+					out = []
+					pbar = tqdm(idx, **tqdm_kw_)
+					for i in pbar:
+						pbar.set_postfix({"idx": i, "basename": self.basenames[i]})
+						out.append(func(self, i, *args, **kwargs))
 
 					logger.info(f'Finished {tqdm_kw_["desc"].lower()} (total={len(out)}).')
 					return out
@@ -554,6 +552,11 @@ class DataManager:
 
 		return image
 
+	@staticmethod
+	def imwrite(image, filename):
+		mkdirs(os.path.dirname(filename))
+		tifffile.imwrite(filename, image)
+
 	def __getitem__(self, idx):
 		"""Get the image and associated data for a given index."""
 
@@ -574,41 +577,86 @@ class DataManager:
 
 		if basename in self.cache:  # Check if the image is already in memory
 			data = self.cache[basename]
-			image, labels, prob = data.image, data.labels, data.prob
 
 			logger.debug(f"Image {idx}:{basename} loaded from cache. Cache size: {len(self.cache)}.")
 
 		else:  # Load the image and associated data
-			image = self.imread(self.paths[basename].path_image, hist_equalize=AUTO_CONTRAST)
+			data = dict_(basename=basename)
 
-			labels, prob = None, None
-			if self.paths[basename].path_labels is not None:
-				labels = self.imread(self.paths[basename].path_labels).round().astype("uint8")
+			for data_type in DATA_TYPES:
+				data[data_type] = self.get_data(idx=idx, data_type=data_type)
 
-			if self.paths[basename].path_prob is not None:
-				prob = tifffile.imread(self.paths[basename].path_prob)
-
-			data = dict_(image=image, labels=labels, prob=prob)
+			# Add to cache
 			self.cache.enqueue(name=basename, item=data)
 
 			logger.debug(f"Image {idx}:{basename} loaded to cache. Cache size: {len(self.cache)}.")
 
-		out = dict_(basename=basename, image=image, labels=labels, prob=prob)
-		return out
+		return data
+
+	@_iterable_idx()
+	def get_data(self, idx=None, data_type=None):
+		"""
+		Get the image or associated data for a given index.
+
+		Parameters
+		----------
+		idx : int, str, slice, Iterable[int], Iterable[str]
+			Index of the image to get.
+		data_type : str
+			Type of data to return.
+
+		Returns
+		-------
+
+		"""
+		basename = self.basenames[idx]
+
+		if data_type == "image":
+			image = self.imread(self.paths[basename].image, hist_equalize=AUTO_CONTRAST)
+			return image
+
+		elif data_type == "labels":
+			if self.paths[basename].labels is None:
+				return None
+			labels = self.imread(self.paths[basename].labels).round().astype("uint8")
+			return labels
+
+		elif data_type == "prob":
+			if self.paths[basename].prob is None:
+				return None
+			prob = tifffile.imread(self.paths[basename].prob)
+			return prob
+
+		elif data_type == "model_out":
+			if self.paths[basename].model_out is None:
+				return None
+			with open(self.paths[basename].model_out, "rb") as f:
+				model_out = pickle.load(f)
+
+			model_out = dict_(
+					mask=model_out[0],
+					flow=model_out[1],
+					style=model_out[2],
+			)
+
+			return model_out
+
+		else:
+			raise ValueError(f"Invalid data type '{data_type}'. Valid types are: {', '.join(DATA_TYPES.keys())}.")
 
 	@_iterable_idx()
 	def has_labels(self, idx=None):
 		"""Check if the image has labels."""
 		basename = self.basenames[idx]
 
-		return self.paths[basename].path_labels is not None
+		return self.paths[basename].labels is not None
 
 	@_iterable_idx()
 	def has_prob(self, idx=None):
 		"""Check if the image has associated probabilities."""
 		basename = self.basenames[idx]
 
-		return self.paths[basename].path_prob is not None
+		return self.paths[basename].prob is not None
 
 	def get_labeled_data(self):
 		"""Get all images with associated labels."""
@@ -628,19 +676,16 @@ class DataManager:
 
 		"""
 
-		fields = ["path_image", "path_labels", "path_prob"]
-		dirs = ["data", "labels", "prob"]
-		for field, dir in zip(fields, dirs):
-			src = [os.path.join(self.dir_root, self.paths[basename][field]) for basename in self.paths if
-				self.paths[basename][field] is not None]
-			copy(src=src, dst=os.path.join(dir_target, dir))
+		for data_type, d in DATA_TYPES.items():
+			src = [os.path.join(self.dir_root, self.paths[basename][data_type]) for basename in self.paths if
+				self.paths[basename][data_type] is not None]
+			copy(src=src, dst=os.path.join(dir_target, d.dirname))
 
 	def fit(self):
 		idx = [i for i in range(self.num_samples) if self.has_labels(i)]
 
-		data = self[idx]
-		images = [d.image for d in data]
-		labels = [d.labels for d in data]
+		images = self.get_data(idx=idx, data_type="image")
+		labels = self.get_data(idx=idx, data_type="labels")
 		self.pixel_classifier.fit(images=images, labels=labels)
 		return None
 
@@ -649,31 +694,35 @@ class DataManager:
 		if filename is None:
 			filename = os.path.join(self.dir_root, "pixel_classifier.pkl")
 		with open(filename, "wb") as f:
-			pkl.dump(self.pixel_classifier, f)
+			pickle.dump(self.pixel_classifier, f)
 		logger.info(f"Pixel classifier saved to {filename}.")
 		return filename
 
 	@_iterable_idx(tqdm_kw=dict(desc="Predicting probabilities", unit="image"))
 	def predict_prob(self, idx=None, plot=False, **plot_kwargs):
 		basename = self.basenames[idx]
-		data = self[idx]
-		image = data.image
-		data.prob = self.pixel_classifier.predict_prob(images=image)
+		image = self.get_data(idx=idx, data_type="image")
+
+		prob = self.pixel_classifier.predict_prob(images=image)
 
 		# save probabilities to file
 		filename = os.path.join(self.dir_root, "prob", basename + ".tif")
-		mkdirs(os.path.dirname(filename))
-		tifffile.imwrite(filename, data.prob)
+		self.imwrite(image=prob, filename=filename)
 		logger.debug(f"Probabilities saved to {filename}.")
 
-		# update class
-		self.paths[basename].path_prob = filename
-		self.cache.update(name=basename, item=data)
+		# update paths
+		self.paths[basename].prob = filename
+
+		# update cache
+		if basename in self.cache:
+			data = self[basename]
+			data.prob = prob
+			self.cache.update(name=basename, item=data)
 
 		if plot:
 			self.plot_image_classification(idx, **plot_kwargs)
 
-		return data.prob
+		return prob
 
 	def predict(self, idx=None, plot=False, **plot_kwargs):
 		"""
@@ -694,11 +743,53 @@ class DataManager:
 			Predicted probabilities for each pixel in the image.
 		"""
 		prob = self.predict_prob(idx=idx, plot=plot, **plot_kwargs)
-		return prob.argmax(axis=-1) + 1
+		return np.argmax(prob, axis=-1) + 1
+
+	@_iterable_idx(tqdm_kw=dict(desc="Predicting model masks", unit="image"))
+	def mask(self, idx=None):
+
+		if self.cellpose_model is None:
+			logger.info("Loading cellpose model...")
+
+			import torch
+
+			device = torch.device("cuda" if torch.cuda.is_available() else "cpu")  # Use GPU if available, otherwise CPU
+			logger.info(f"Using device: {device}")
+
+			from cellpose import models
+
+			self.cellpose_model = models.CellposeModel(gpu=torch.cuda.is_available(), device=device)
+			logger.info("Cellpose model loaded.")
+
+		# import ray
+		# ray.init(address='127.0.0.1:6379')
+
+		basename = self.basenames[idx]
+		image = self.get_data(idx=idx, data_type="image")
+		model_out = self.cellpose_model.eval(x=image)  # mask, flow, style
+		model_out = list(model_out)
+		model_out[0] = model_out[0].astype("uint16")
+
+		# save mask to file
+		filename = os.path.join(self.dir_root, "model_out", basename + ".pkl")
+		mkdirs(os.path.dirname(filename))
+		with open(filename, "wb") as f:
+			pickle.dump(model_out, f)
+		logger.debug(f"Model output saved to {filename}.")
+
+		# update paths
+		self.paths[basename].model_out = filename
+		# update cache
+		if basename in self.cache:
+			data = self[basename]
+			data.model_out = model_out
+			self.cache.update(name=basename, item=data)
+
+		return model_out
 
 	@_iterable_idx(tqdm_kw=dict(desc="Plotting", unit="image"))
 	def plot_image_classification(self, idx=None,
-			axs=None, which="all", save_fig=False, imshow_kw=None, **set_props_kw):
+			axs=None, save_fig=False, imshow_kw=None, **set_props_kw):
 		"""
 		Plot predictions.
 
@@ -710,13 +801,6 @@ class DataManager:
 			Axes object to plot on. If given as a list, plots will be
 			[image, probabilities, predictions, image+probabilities] (or a part, depending on len(axs)).
 			If None, a new Axes object will be created.
-		which :         str or list[str]
-			Which plots to show:
-			- "image": Show the image.
-			- "probabilities": Show the predicted probabilities.
-			- "predictions": Show the predicted class labels.
-			- "image+probabilities": Show the image and predicted probabilities together.
-			- "all": Show all plots [image, probabilities, predictions, image+probabilities] (or a part).
 		save_fig :      bool, optional
 			If True, save the figure to a file.
 		imshow_kw :     dict, optional
@@ -734,89 +818,100 @@ class DataManager:
 			raise ValueError("`alpha` keyword argument is not supported. Define `alpha` in the __cfg__ file instead.")
 
 		data = self[idx]
-		basename, image, labels, prob = data.basename, data.image, data.labels, data.prob
+		basename, image, labels, prob, model_out = data.basename, data.image, data.labels, data.prob, data.model_out
 
-		def _which2ax(axs=None, which="all", prob=None):
-			WHICH_VALUES = ["image", "probabilities", "predictions", "image+probabilities"]
-			if isinstance(which, str):
-				if which == "all":
-					if prob is None:
-						which = ["image"]
-					else:
-						which = WHICH_VALUES
-				else:
-					which = [which]
-			if not set(which).issubset(set(WHICH_VALUES)):
-				raise ValueError(f"Invalid value in `which`. Allowed values are: {WHICH_VALUES} or 'all'.")
+		mask, flow, style = None, None, None
+		if model_out is not None:
+			mask, flow, style = model_out.mask, model_out.flow, model_out.style
 
-			if axs is None:  # create new axes
-				shape = (1, len(which))
-				if len(which) == 4:  # len(WHICH_VALUES)
-					shape = (2, 2)
-				axs = gr.Axes(shape=shape)
-			if isinstance(axs, Axes):
-				axs = [axs]
-			elif isinstance(axs, gr.Axes):
-				axs = axs.axs.flatten()
+		if axs is None:  # create new axes
+			axs = gr.Axes(shape=(2, 4), figsize=(15, 8), grid_layout=[[(0, 2), (0, 2)]]).axs
+			"""
+			+-----------------+-----------------+-----------------+-----------------+
+			|                 |  Probabilities  |   Predictions   |   Image+Prob    |
+			|      Image      +-----------------+-----------------+-----------------+
+			|                 |                 |       Mask      |   Image+Mask    |
+			+-----------------+-----------------+-----------------+-----------------+
+			"""
+			axs = axs[axs != 0]
 
-			return axs, which
+		elif isinstance(axs, gr.Axes):
+			axs = axs.axs
 
-		axs, which = _which2ax(axs, which, prob)
+		if not isinstance(axs, Iterable):
+			raise TypeError(f"`axs` must be an Axes object or a list of Axes objects (given {type(axs)} instead).")
 
-		def plot_image(ax, image, cmap="gray", **kwargs):
+		def plot_image(ax, image, cmap="gray", **imshow_kw):
 			if len(ax.images) == 0:
-				ax.imshow(image, cmap=cmap, **kwargs)
+				ax.imshow(image, cmap=cmap, **imshow_kw)
 			else:
 				ax.images[0].set_data(image)
 
-		def plot_probabilities(ax, prob, cmap, **kwargs):
+		def plot_probabilities(ax, prob, cmap, **imshow_kw):
 			X = np.einsum("...i,ij->...j", prob, np.array(cmap.colors))
+
 			if len(ax.images) < 2:
-				ax.imshow(X, cmap=cmap, **kwargs)
+				ax.imshow(X, cmap=cmap, **imshow_kw)
 			else:
 				ax.images[-1].set_data(X)
 
-		def plot_predictions(ax, prob, cmap, **kwargs):
-			X = prob.argmax(axis=-1) + 1
-			ax.imshow(X, cmap=cmap, **kwargs)
+		def plot_predictions(ax, prob, cmap, **imshow_kw):
+			X = np.argmax(prob, axis=-1) + 1
 
 			if len(ax.images) < 2:
-				ax.imshow(X, cmap=cmap, **kwargs)
+				ax.imshow(X, cmap=cmap, **imshow_kw)
 			else:
 				ax.images[-1].set_data(X)
 
-		for i, ax in enumerate(axs):
-			if i >= len(which):
-				break
+		def plot_mask(ax, mask, cmap, **kwargs):
+			mask = mask > 0  # convert to binary mask
 
-			if which[i] == "image":
-				plot_image(ax, image, **imshow_kw)
-				ax.set_title("Image")
+			if len(ax.images) < 2:
+				ax.imshow(mask, cmap=cmap, **kwargs)
 			else:
-				if prob is None:
-					logger.warning(f"Image {idx} has no associated data. Skipping {which[i]} plot.")
-					continue
+				ax.images[-1].set_data(mask)
 
-				if which[i] == "probabilities":
-					plot_probabilities(ax, prob, cmap=CMAP.rgb, **imshow_kw)
-					ax.set_title("Probabilities")
-					if ax.child_axes:  # colorbar
-						pass
-					else:
-						cax = ax.inset_axes(bounds=(0.01, 0.01, 0.03, 0.2))
-						cax.grid(False)
-						cbar = ax.figure.colorbar(mappable=ax.images[-1], cax=cax, orientation="vertical")
-						cax.tick_params(axis="y", direction="in", color="none", pad=2)  # ticks
-						cax.set_yticks(ticks=np.linspace(*cax.get_ylim(), 2 * len(LABELS) + 1)[1::2],
-								labels=[f"{label_idx}: {label}" for (label, label_idx) in LABELS2IDX.items()],
-								fontsize=7, rotation=0, color="white")  # tick labels
-				elif which[i] == "predictions":
-					plot_predictions(ax, prob, cmap=CMAP.rgb, **imshow_kw)
-					ax.set_title("Predictions")
-				else:  # which[i] == "image+probabilities":
-					plot_image(ax, image, **imshow_kw)
-					plot_probabilities(ax, prob, cmap=CMAP.rgba, **imshow_kw)
-					ax.set_title("Image + Probabilities")
+		# 0: Image
+		ax = axs[0]
+		plot_image(ax, image, **imshow_kw)
+		ax.set_title("Image")
+
+		# 1: Predictions
+		if prob is not None:
+			ax = axs[1]
+			plot_predictions(ax, prob, cmap=CMAP.rgb, **imshow_kw)
+			ax.set_title("Predictions")
+
+			if ax.child_axes:  # colorbar exists
+				pass
+			else:  # add colorbar
+				cax = ax.inset_axes(bounds=(0.01, 0.01, 0.03, 0.2))
+				cax.grid(False)
+				cbar = ax.figure.colorbar(mappable=ax.images[-1], cax=cax, orientation="vertical")
+				cax.tick_params(axis="y", direction="in", color="none", pad=2)  # ticks
+				cax.set_yticks(ticks=np.linspace(*cax.get_ylim(), 2 * len(LABELS) + 1)[1::2],
+						labels=[f"{label_idx}: {label}" for (label, label_idx) in LABELS2IDX.items()],
+						fontsize=7, rotation=0, color="white")  # tick labels
+
+		# 2: Image + Probabilities
+		if prob is not None:
+			ax = axs[2]
+			plot_image(ax, image, **imshow_kw)
+			plot_predictions(ax, prob, cmap=CMAP.rgba, **imshow_kw)
+			ax.set_title("Image + Predictions")
+
+		# 3: Mask
+		if mask is not None:
+			ax = axs[3]
+			plot_mask(ax, mask, cmap=CMAP.rgb_mask, **imshow_kw)
+			ax.set_title("Mask")
+
+		# 4: Image + Mask
+		if mask is not None:
+			ax = axs[4]
+			plot_image(ax, image, **imshow_kw)
+			plot_mask(ax, mask, cmap=CMAP.rgba_mask, **imshow_kw)
+			ax.set_title("Image + Mask")
 
 		Ax = gr.Axes(axs=axs)
 		set_props_kw = dict(
@@ -830,7 +925,7 @@ class DataManager:
 		data_instance = [axs[i].images for i in range(len(axs))]
 		return data_instance
 
-	def movie_image_classification(self, axs=None, which="all", save_file_name=None, **kwargs):
+	def movie_image_classification(self, axs=None, save_file_name=None, **kwargs):
 		"""
 		Create a movie of the predictions.
 
@@ -840,13 +935,6 @@ class DataManager:
 			Axes object to plot on. If given as a list, plots will be
 			[image, probabilities, predictions, image+probabilities] (or a part, depending on len(axs)).
 			If None, a new Axes object will be created.
-		which :         str or list[str]
-			Which plots to show:
-			- "image": Show the image.
-			- "probabilities": Show the predicted probabilities.
-			- "predictions": Show the predicted class labels.
-			- "image+probabilities": Show the image and predicted probabilities together.
-			- "all": Show all plots [image, probabilities, predictions, image+probabilities] (or a part).
 		save_file_name : str or None
 			Path to save the movie. If None, the movie will not be saved.
 		**kwargs :      sent to imshow
@@ -858,12 +946,12 @@ class DataManager:
 		if save_file_name is None:
 			save_file_name = os.path.join(self.dir_root, "figs", "classification_movie.gif")
 
-		data_instance = self.plot_image_classification(idx=0, axs=axs, which=which, show_fig=False)
+		data_instance = self.plot_image_classification(idx=0, axs=axs, show_fig=False)
 		axs = [data_instance[i]._axes for i in range(len(data_instance))]  # Get the Axes from the data instance
 
 		def update_data(idx):
 			"""Update the data for each Axes."""
-			return self.plot_image_classification(idx=idx, axs=axs, which=which, show_fig=False)
+			return self.plot_image_classification(idx=idx, axs=axs, show_fig=False)
 
 		logger.info(f"Creating movie with {len(self)} frames...")
 		Ax = gr.Axes(axs=axs)
@@ -883,7 +971,6 @@ class DataManager:
 		----------
 		axs :           Axes or list[Axes]
 			Axes object to plot on.
-		# todo: add which parameter
 		save_fig :      bool, optional
 			If True, save the figure to a file.
 		**set_props_kw : dict, optional
@@ -893,34 +980,55 @@ class DataManager:
 
 		"""
 		if axs is None:
-			axs = gr.Axes(shape=(2, 2)).axs.flatten()
+			axs = gr.Axes(shape=(2, 2), figsize=(15, 15)).axs.flatten()
 		if not all(self.has_prob()):
 			raise ValueError("Not all images have associated probabilities. Run `predict()` on all images first.")
 
 		# Avg. Nuclei Intensity vs. Time
 		intensity = np.zeros((len(self), len(LABELS)))
-		for idx in tqdm(range(len(self))):
+		props = []
+		for idx in tqdm(range(len(self)), desc="Calculating statistics", unit="image"):
 			data = self[idx]
-			basename, image, labels, prob = data.basename, data.image, data.labels, data.prob
-			pred = prob.argmax(axis=-1) + 1
+			basename, image, labels, prob, model_out = data.basename, data.image, data.labels, data.prob, data.model_out
+			pred = np.argmax(prob, axis=-1) + 1
+			mask = model_out.mask
 
 			for i, label_idx in enumerate(LABELS2IDX.values()):
-				mask = (pred == label_idx)
-				intensity[idx, i] = np.sum(image[mask])
+				intensity[idx, i] = np.sum(image[pred == label_idx])
 
-		axs[0].plot(np.arange(len(self)), intensity)
-		axs[0].set_title("Average Nuclei Intensity")
-		axs[0].set_xlabel("Image Index")
-		axs[0].set_ylabel("Intensity")
-		axs[0].legend(LABELS, loc="upper right")
-		axs[0].set_xlim(0, len(self))
-		axs[0].set_ylim(0, None)
+			props.append(regionprops(label_image=mask, intensity_image=image))
+
+		def plot_xy(ax, x, y, title=None, xlabel=None, ylabel=None, ylim=None):
+			ax.plot(x, y)
+			ax.set_title(title)
+			ax.set_xlabel(xlabel)
+			ax.set_ylabel(ylabel)
+			ax.legend(LABELS, loc="upper right")
+			ax.set_xlim(x[0], x[-1])
+			ax.set_ylim(*ylim)
+
+		plot_xy(ax=axs[0],
+				x=range(len(self)), y=intensity,
+				title="Average Nuclei Intensity",
+				xlabel="Image Index",
+				ylabel="Intensity",
+				ylim=[0, None])
 
 		# Avg. Nuclei Size vs. Time
-		raise NotImplementedError  # todo:
+		area = []
+		with warnings.catch_warnings():
+			warnings.simplefilter("ignore", category=RuntimeWarning)
+			for prop in props:
+				area.append(np.mean([p.area for p in prop]))  # todo: continue from here
+		plot_xy(ax=axs[1],
+				x=range(len(self)), y=area,
+				title="Average Nuclei Size",
+				xlabel="Image Index",
+				ylabel="Area (pixels)",
+				ylim=[0, None])
 
 		# Nuclei Density vs. Time
-		raise NotImplementedError  # todo:
+		# raise NotImplementedError  # todo:
 
 		Ax = gr.Axes(axs=axs)
 		set_props_kw = dict(

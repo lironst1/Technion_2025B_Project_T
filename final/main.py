@@ -8,7 +8,7 @@ from liron_utils import graphics as gr
 
 from __cfg__ import IMAGE_EXTENSIONS, PATH_DATA, get_path, AUTO_CONTRAST, SIGMAS, RANDOM_FOREST_CLASSIFIER_KW, \
 	PATH_ILASTIK_EXE, set_props_kw_image, CMAP, logger
-from utils import flatten_image_tree, DataManager, print_image_tree, PixelClassifier
+from utils import flatten_image_tree, DataManager, print_image_tree, RandomForestPixelClassifier
 from utils_napari import split_labels_tif
 
 # flatten_image_tree(
@@ -28,11 +28,13 @@ file_pkl = os.path.join(get_path("all_head"), "pixel_classifier.pkl")
 dm = DataManager(
 		dir_root=get_path("2025_03_05"),
 		# sample_size=10,
-		# labeled=False,
-		pixel_classifier=file_pkl
+		# labeled=True,
+		random_forest_pixel_classifier=file_pkl
 )
-# dm.predict(plot=True, save_fig=True)
-dm.plot_stats()
+# dm.predict()
+# dm.mask()
+# dm.plot_image_classification(save_fig=True)
+dm.plot_stats(save_fig=True)
 
 # run_ilastik(path_project=rel_path("MyProject.ilp"), dir_root=rel_path("train"))
 
