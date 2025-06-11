@@ -13,7 +13,6 @@ import tifffile
 from matplotlib.axes import Axes
 import matplotlib.pyplot as plt
 from collections.abc import Iterable
-from skimage.exposure import equalize_adapthist
 from skimage.measure import regionprops
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.preprocessing import StandardScaler
@@ -21,12 +20,12 @@ from scipy.ndimage import gaussian_filter, gaussian_gradient_magnitude
 import functools
 
 from liron_utils.files import copy
-from liron_utils.pure_python import dict_, NamedQueue, parallel_threading, parallel_map
+from liron_utils.pure_python import dict_, NamedQueue, parallel_threading, tqdm_
 from liron_utils.files import open_file, mkdirs
 from liron_utils import graphics as gr
 
-from __cfg__ import logger, IMAGE_EXTENSIONS, PATH_DATA, get_path, AUTO_CONTRAST, SIGMAS, RANDOM_FOREST_CLASSIFIER_KW, \
-	PATH_ILASTIK_EXE, set_props_kw_image, LABELS, LABELS2IDX, CMAP, DATA_TYPES
+from __cfg__ import logger, IMAGE_EXTENSIONS, AUTO_CONTRAST, SIGMAS, RANDOM_FOREST_CLASSIFIER_KW, \
+	set_props_kw_image, LABELS, LABELS2IDX, CMAP, DATA_TYPES
 import tests
 
 
@@ -475,7 +474,7 @@ class DataManager:
 		return self.num_samples
 
 	@staticmethod
-	def _iterable_idx(tqdm_kw=None):
+	def _iterable_idx(tqdm_kw=None, use_threading=False):
 		if tqdm_kw is None:
 			tqdm_kw = dict(disable=True)
 		tqdm_kw = dict(desc="Processing", delay=0.1) | tqdm_kw  # default tqdm settings
@@ -507,14 +506,18 @@ class DataManager:
 							elif not isinstance(idx[i], int):
 								raise TypeError(f"Index must be an integer or a string (given {type(idx[i])} instead).")
 
-					tqdm_kw_ = dict(total=len(idx)) | tqdm_kw
+					tqdm_kw_ = dict(total=len(idx), postfix=lambda i: dict(idx=i, basename=self.basenames[i])) | tqdm_kw
 					logger.info(f'{tqdm_kw_["desc"]} (total={tqdm_kw_["total"]})...')
 
-					out = []
-					pbar = tqdm(idx, **tqdm_kw_)
-					for i in pbar:
-						pbar.set_postfix({"idx": i, "basename": self.basenames[i]})
-						out.append(func(self, i, *args, **kwargs))
+					def func_threading(i):
+						return func(self, i, *args, **kwargs)
+
+					if use_threading:
+						out = parallel_threading(func=func_threading, iterable=idx, tqdm_kw=tqdm_kw_)
+					else:
+						out = []
+						for i in tqdm_(idx, **tqdm_kw_):
+							out.append(func(self, i, *args, **kwargs))
 
 					logger.info(f'Finished {tqdm_kw_["desc"].lower()} (total={len(out)}).')
 					return out
@@ -950,7 +953,7 @@ class DataManager:
 		axs = [data_instance[i]._axes for i in range(len(data_instance))]  # Get the Axes from the data instance
 
 		def update_data(idx):
-			"""Update the data for each Axes."""
+			"""Update the data for each axes."""
 			return self.plot_image_classification(idx=idx, axs=axs, show_fig=False)
 
 		logger.info(f"Creating movie with {len(self)} frames...")
