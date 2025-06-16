@@ -32,7 +32,7 @@ dm = DataManager(
 # dm.predict()
 # dm.mask()
 # dm.plot_image_classification(save_fig=True)
-dm.plot_stats(save_fig=True)
+dm.plot_stats(save_fig=False)
 
 # run_ilastik(path_project=rel_path("MyProject.ilp"), dir_root=rel_path("train"))
 

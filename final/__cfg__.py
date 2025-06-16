@@ -9,6 +9,7 @@ from liron_utils.pure_python import dict_, ispc
 DEBUG = False
 
 gr.update_rcParams("liron_utils-article")
+gr.update_rcParams("liron_utils-text_color", "white")
 gr.update_rcParams({
 	'figure.autolayout':     False,
 	'figure.figsize': [15, 8],  # figure size in inches
@@ -18,9 +19,9 @@ gr.update_rcParams({
 	'figure.subplot.right':  0.95,  # the right side of the subplots of the figure
 	'figure.subplot.bottom': 0.05,  # the bottom of the subplots of the figure
 	'figure.subplot.top':    0.93,  # the top of the subplots of the figure
-	'figure.subplot.wspace': 0.15,  # the amount of width reserved for space between subplots,
+	'figure.subplot.wspace': 0.2,  # the amount of width reserved for space between subplots,
 	# expressed as a fraction of the average axis width
-	'figure.subplot.hspace': 0.15,  # the amount of height reserved for space between subplots,
+	'figure.subplot.hspace': 0.2,  # the amount of height reserved for space between subplots,
 	# expressed as a fraction of the average axis height
 
 	'savefig.format':        'tif',
@@ -75,6 +76,8 @@ CMAP = dict_(
 CMAP.rgb = ListedColormap(CMAP.rgba.colors[:, :3])
 CMAP.rgba_mask = ListedColormap(CMAP.rgba.colors[:2, :])
 CMAP.rgb_mask = ListedColormap(CMAP.rgba.colors[:2, :3])
+
+gr.set_color_cycler(CMAP.rgb.colors)
 
 # %% Set up logger
 logger = Logger(

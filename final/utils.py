@@ -17,6 +17,7 @@ from skimage.measure import regionprops
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.preprocessing import StandardScaler
 from scipy.ndimage import gaussian_filter, gaussian_gradient_magnitude
+from scipy.spatial import distance_matrix
 import functools
 
 from liron_utils.files import copy
@@ -477,7 +478,7 @@ class DataManager:
 	def _iterable_idx(tqdm_kw=None, use_threading=False):
 		if tqdm_kw is None:
 			tqdm_kw = dict(disable=True)
-		tqdm_kw = dict(desc="Processing", delay=0.1) | tqdm_kw  # default tqdm settings
+		tqdm_kw = dict(disable=False, desc="Processing", delay=0.1) | tqdm_kw  # default tqdm settings
 
 		def decorator(func):
 
@@ -507,7 +508,8 @@ class DataManager:
 								raise TypeError(f"Index must be an integer or a string (given {type(idx[i])} instead).")
 
 					tqdm_kw_ = dict(total=len(idx), postfix=lambda i: dict(idx=i, basename=self.basenames[i])) | tqdm_kw
-					logger.info(f'{tqdm_kw_["desc"]} (total={tqdm_kw_["total"]})...')
+					if not tqdm_kw["disable"]:
+						logger.info(f'{tqdm_kw_["desc"]} (total={tqdm_kw_["total"]})...', stacklevel=4)
 
 					def func_threading(i):
 						return func(self, i, *args, **kwargs)
@@ -519,7 +521,9 @@ class DataManager:
 						for i in tqdm_(idx, **tqdm_kw_):
 							out.append(func(self, i, *args, **kwargs))
 
-					logger.info(f'Finished {tqdm_kw_["desc"].lower()} (total={len(out)}).')
+					if not tqdm_kw["disable"]:
+						logger.info(f'Finished {tqdm_kw_["desc"].lower()} (total={len(out)}).', stacklevel=4)
+
 					return out
 
 				else:
@@ -983,13 +987,19 @@ class DataManager:
 
 		"""
 		if axs is None:
-			axs = gr.Axes(shape=(2, 2), figsize=(15, 15)).axs.flatten()
+			axs = gr.Axes(shape=(2, 3), figsize=(15, 12)).axs.flatten()
+		axs_iter = iter(axs)
 		if not all(self.has_prob()):
 			raise ValueError("Not all images have associated probabilities. Run `predict()` on all images first.")
 
-		# Avg. Nuclei Intensity vs. Time
-		intensity = np.zeros((len(self), len(LABELS)))
-		props = []
+		# Calculate statistics
+		stats = dict_(
+				count=np.zeros(len(self)),
+				intensity=np.full((len(self), len(LABELS)), np.nan),
+				avg_area=np.full(len(self), np.nan),
+				avg_dist=np.full(len(self), np.nan),  # average distance between nuclei
+		)
+		logger.info("Calculating statistics...")
 		for idx in tqdm(range(len(self)), desc="Calculating statistics", unit="image"):
 			data = self[idx]
 			basename, image, labels, prob, model_out = data.basename, data.image, data.labels, data.prob, data.model_out
@@ -997,37 +1007,70 @@ class DataManager:
 			mask = model_out.mask
 
 			for i, label_idx in enumerate(LABELS2IDX.values()):
-				intensity[idx, i] = np.sum(image[pred == label_idx])
+				stats.intensity[idx, i] = np.mean(image[pred == label_idx])
 
-			props.append(regionprops(label_image=mask, intensity_image=image))
+			props = regionprops(label_image=mask, intensity_image=image)
 
+			count = len(props)
+			stats.count[idx] = count
+
+			if count:
+				with warnings.catch_warnings():
+					warnings.simplefilter("ignore", category=RuntimeWarning)
+
+					stats.avg_area[idx] = np.mean([p.area for p in props])
+
+					centroids = [p.centroid for p in props]
+					dist_mat = np.triu(distance_matrix(x=centroids, y=centroids), k=1)
+					stats.avg_dist[idx] = np.mean(dist_mat[dist_mat > 0])  # average distance between nuclei
+
+		logger.info("Finished calculating statistics.")
+		
 		def plot_xy(ax, x, y, title=None, xlabel=None, ylabel=None, ylim=None):
-			ax.plot(x, y)
+			y = np.asarray(y)
+			if y.ndim == 1:
+				ax.plot(x, y, color=CMAP.rgb.colors[1])  # nuclei
+			else:
+				ax.plot(x, y)
+				ax.legend(LABELS, loc="upper right")
 			ax.set_title(title)
 			ax.set_xlabel(xlabel)
 			ax.set_ylabel(ylabel)
-			ax.legend(LABELS, loc="upper right")
 			ax.set_xlim(x[0], x[-1])
 			ax.set_ylim(*ylim)
 
-		plot_xy(ax=axs[0],
-				x=range(len(self)), y=intensity,
-				title="Average Nuclei Intensity",
+		x = range(len(self))
+
+		# Nuclei Count vs. Time
+		plot_xy(ax=next(axs_iter),
+				x=x, y=stats.count,
+				title="Nuclei Count",
 				xlabel="Image Index",
-				ylabel="Intensity",
+				ylabel="Count",
 				ylim=[0, None])
 
-		# Avg. Nuclei Size vs. Time
-		area = []
-		with warnings.catch_warnings():
-			warnings.simplefilter("ignore", category=RuntimeWarning)
-			for prop in props:
-				area.append(np.mean([p.area for p in prop]))  # todo: continue from here
-		plot_xy(ax=axs[1],
-				x=range(len(self)), y=area,
-				title="Average Nuclei Size",
+		# Avg. Nuclei Intensity vs. Time
+		plot_xy(ax=next(axs_iter),
+				x=x, y=stats.intensity,
+				title="Average Nuclei Intensity",
 				xlabel="Image Index",
-				ylabel="Area (pixels)",
+				ylabel="Average Intensity",
+				ylim=[0, None])
+
+		# Avg. Nuclei Area vs. Time
+		plot_xy(ax=next(axs_iter),
+				x=x, y=stats.avg_area,
+				title="Average Nuclei Area",
+				xlabel="Image Index",
+				ylabel="Area [pixels]",
+				ylim=[0, None])
+
+		# Average Nuclei Distance vs. Time
+		plot_xy(ax=next(axs_iter),
+				x=x, y=stats.avg_dist,
+				title="Average Nuclei Distance",
+				xlabel="Image Index",
+				ylabel="Distance [pixels]",
 				ylim=[0, None])
 
 		# Nuclei Density vs. Time
