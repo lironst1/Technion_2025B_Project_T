@@ -33,7 +33,7 @@ TQDM_KW = dict(
 		disable=False,
 		desc="Processing",
 		delay=0.1,
-		ncols=120,
+		# ncols=120,
 )
 
 # %% Constants
@@ -73,7 +73,7 @@ CPSAM_EVAL_KW = dict_(
 		# flow_threshold=0.2,
 		cellprob_threshold=2.0,
 		min_size=7 ** 2,  # min nuclei size in pixels
-		max_size_fraction=25 ** 2 / 488 ** 2,  # max nuclei size (fraction relative to image size)
+		max_size_fraction=20 ** 2 / 488 ** 2,  # max nuclei size (fraction relative to image size)
 )
 
 
