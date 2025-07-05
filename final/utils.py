@@ -1,8 +1,11 @@
 import os
-import random
+import time
 import warnings
-from natsort import natsorted
+import random
+import functools
+from collections.abc import Iterable
 from collections import defaultdict
+from natsort import natsorted
 from prettytable import PrettyTable
 import pickle
 from tqdm import tqdm
@@ -12,13 +15,11 @@ import cv2
 import tifffile
 from matplotlib.axes import Axes
 import matplotlib.pyplot as plt
-from collections.abc import Iterable
 from skimage.measure import regionprops
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.preprocessing import StandardScaler
 from scipy.ndimage import gaussian_filter, gaussian_gradient_magnitude
 from scipy.spatial import distance_matrix
-import functools
 
 from liron_utils.files import copy
 from liron_utils.pure_python import dict_, NamedQueue, parallel_threading, tqdm_
@@ -26,7 +27,7 @@ from liron_utils.files import open_file, mkdirs
 from liron_utils import graphics as gr
 
 from __cfg__ import logger, IMAGE_EXTENSIONS, AUTO_CONTRAST, SIGMAS, RANDOM_FOREST_CLASSIFIER_KW, \
-	set_props_kw_image, LABELS, LABELS2IDX, CMAP, DATA_TYPES
+	set_props_kw_image, LABELS, LABELS2IDX, CMAP, DATA_TYPES, CPSAMEvalOut, Stats, CPSAM_EVAL_KW, TQDM_KW
 import tests
 
 
@@ -51,8 +52,8 @@ def print_image_tree(dir_root):
 	dir_data = os.path.join(dir_root, "data")
 	dir_labels = os.path.join(dir_root, "labels")
 
-	if not os.path.exists(dir_data) or not os.path.exists(dir_labels):
-		raise FileNotFoundError(f"Expected 'data' and 'labels' directories inside {dir_root}")
+	tests.dir_exist(dir_data)
+	tests.dir_exist(dir_labels)
 
 	# Collect image and label file paths
 	files_data = natsorted([f.replace(".lnk", "") for f in os.listdir(dir_data) if is_image(f)])
@@ -381,8 +382,11 @@ class DataManager:
 			│   ├── labels
 			│   │   ├── 2025_01_29__View1__Max_C1__1_beta_cat_25x_10min_T2_C1.tif
 			│   │   ├── ...
-			│   ├── prob (pixel classifier outputs)
-			│   │   ├── 2025_01_29__View1__Max_C1__1_beta_cat_25x_10min_T2_C1.tif
+			│   ├── random_forest_prob
+			│   │   ├── 2025_01_29__View1__Max_C1__1_beta_cat_25x_10min_T2_C1.pkl
+			│   │   ├── ...
+			│   ├── cpsam_out
+			│   │   ├── 2025_01_29__View1__Max_C1__1_beta_cat_25x_10min_T2_C1.pkl
 			│   │   ├── ...
 		sample_size :           int, float, or bool, optional
 			Number of images to randomly sample from the directory.
@@ -456,29 +460,40 @@ class DataManager:
 		self.cache = NamedQueue(max_size=cache_size)
 
 		# Pixel classifier
-		if random_forest_pixel_classifier is None:
-			self.pixel_classifier: RandomForestPixelClassifier = RandomForestPixelClassifier()
-			logger.info(f"Creating new pixel classifier.")
-		elif isinstance(random_forest_pixel_classifier, RandomForestPixelClassifier):
+		self.pixel_classifier = None
+		if isinstance(random_forest_pixel_classifier, RandomForestPixelClassifier):
 			self.pixel_classifier = random_forest_pixel_classifier
 		elif isinstance(random_forest_pixel_classifier, str):
-			if not os.path.exists(random_forest_pixel_classifier):
-				raise ValueError(f"Pixel classifier file {random_forest_pixel_classifier} does not exist.")
-			with open(random_forest_pixel_classifier, "rb") as file:
-				self.pixel_classifier = pickle.load(file)
-				logger.info(f"Loaded pixel classifier from {random_forest_pixel_classifier}.")
+			tests.file_exist(random_forest_pixel_classifier)
+			self.pixel_classifier = self._pickle_load(random_forest_pixel_classifier)
+			logger.info(f"Loaded pixel classifier from {random_forest_pixel_classifier}.")
 
-		# Cellpose Model
-		self.cellpose_model = None
+		# Cellpose Model (CPSAM)
+		self.cpsam = None
+
+		self._is_tqdm_running = False
 
 	def __len__(self):
 		return self.num_samples
 
+	def __repr__(self):
+		def num_labels():
+			return np.count_nonzero(self.has_labels())
+
+		def num_prob():
+			return np.count_nonzero(self.has_prob())
+
+		return (f"DataManager(#samples={self.num_samples}, #labels={num_labels()}, #prob={num_prob()}, "
+		        f"dir_root={self.dir_root})")
+
 	@staticmethod
-	def _iterable_idx(tqdm_kw=None, use_threading=False):
+	def _iterable_idx(tqdm_kw=None, use_threading=False, batch_size=1, shuffle=False):
 		if tqdm_kw is None:
 			tqdm_kw = dict(disable=True)
-		tqdm_kw = dict(disable=False, desc="Processing", delay=0.1) | tqdm_kw  # default tqdm settings
+		tqdm_kw = TQDM_KW | tqdm_kw  # default tqdm settings
+
+		if use_threading and batch_size > 1:
+			raise ValueError("Threading cannot be used with `batch_size`>1.")
 
 		def decorator(func):
 
@@ -486,7 +501,7 @@ class DataManager:
 			def wrapper(self, idx=None, *args, **kwargs):
 
 				if idx is None:
-					idx = range(self.num_samples)
+					idx = list(range(self.num_samples))
 
 				if isinstance(idx, int):
 					return func(self, idx, *args, **kwargs)
@@ -498,7 +513,7 @@ class DataManager:
 
 				elif isinstance(idx, slice) or isinstance(idx, Iterable):
 					if isinstance(idx, slice):
-						idx = range(self.num_samples)[idx]
+						idx = list(range(self.num_samples)[idx])
 					else:  # if isinstance(idx, Iterable)
 						for i in range(len(idx)):
 							if isinstance(idx[i], str):
@@ -507,21 +522,29 @@ class DataManager:
 							elif not isinstance(idx[i], int):
 								raise TypeError(f"Index must be an integer or a string (given {type(idx[i])} instead).")
 
-					tqdm_kw_ = dict(total=len(idx), postfix=lambda i: dict(idx=i, basename=self.basenames[i])) | tqdm_kw
+					if shuffle:
+						random.shuffle(idx)
+
+					idx_batch = [idx[i:i + batch_size] for i in range(0, len(idx), batch_size)]
+
+					tqdm_kw_ = dict(total=len(idx_batch),
+							postfix=lambda i: dict(idx=i, basename=self.basenames[i])) | tqdm_kw
 					if not tqdm_kw["disable"]:
+						self._is_tqdm_running = True
 						logger.info(f'{tqdm_kw_["desc"]} (total={tqdm_kw_["total"]})...', stacklevel=4)
 
-					def func_threading(i):
-						return func(self, i, *args, **kwargs)
-
 					if use_threading:
+						def func_threading(i):
+							return func(self, i, *args, **kwargs)
+
 						out = parallel_threading(func=func_threading, iterable=idx, tqdm_kw=tqdm_kw_)
 					else:
 						out = []
-						for i in tqdm_(idx, **tqdm_kw_):
+						for i in tqdm_(idx if batch_size == 1 else idx_batch, **tqdm_kw_):
 							out.append(func(self, i, *args, **kwargs))
 
 					if not tqdm_kw["disable"]:
+						self._is_tqdm_running = False
 						logger.info(f'Finished {tqdm_kw_["desc"].lower()} (total={len(out)}).', stacklevel=4)
 
 					return out
@@ -534,18 +557,24 @@ class DataManager:
 		return decorator
 
 	@staticmethod
-	def imread(filename, hist_equalize=False):
-		def auto_contrast(image, clip_hist_percent=0.35):
+	def _imread(filename, auto_contrast=False):
+		"""Read an image from a file."""
+
+		def fix_contrst(image, low_clip_percent=1, high_clip_percent=0.015):
 			hist = cv2.calcHist([image], [0], None, [2 ** 16], [0, 2 ** 16])
 			accumulator = hist.cumsum()
 
-			# Locate points to clip
-			maximum = accumulator[-1]
-			clip_value = clip_hist_percent * maximum / 100.0
-			minimum_gray = np.searchsorted(accumulator, clip_value)
-			maximum_gray = np.searchsorted(accumulator, maximum - clip_value)
+			total = accumulator[-1]
+			low_clip_value = total * low_clip_percent / 100.0
+			high_clip_value = total * (1 - high_clip_percent / 100.0)
 
-			# Stretching
+			minimum_gray = np.searchsorted(accumulator, low_clip_value)
+			maximum_gray = np.searchsorted(accumulator, high_clip_value)
+
+			# Avoid divide-by-zero
+			if maximum_gray == minimum_gray:
+				return cv2.convertScaleAbs(image)
+
 			alpha = 255 / (maximum_gray - minimum_gray)
 			beta = -minimum_gray * alpha
 
@@ -553,16 +582,35 @@ class DataManager:
 			return out
 
 		image = tifffile.imread(filename)
-		if hist_equalize:
+		if auto_contrast:
 			# image = equalize_adapthist(image, **EQUALIZE_ADAPTHIST_KW)
-			image = auto_contrast(image)
+			image = fix_contrst(image)
 
 		return image
 
 	@staticmethod
-	def imwrite(image, filename):
+	def _imwrite(image, filename):
+		"""Write an image to a file."""
 		mkdirs(os.path.dirname(filename))
-		tifffile.imwrite(filename, image)
+
+		ext = os.path.splitext(filename)[1].lower()
+		if ext == ".tif":
+			tifffile.imwrite(filename, image)
+		else:
+			raise ValueError(f"Unsupported file extension for writing: {ext}.")
+
+	@staticmethod
+	def _pickle_load(filename):
+		"""Load a pickle file."""
+		with open(filename, "rb") as f:
+			return pickle.load(f)
+
+	@staticmethod
+	def _pickle_dump(obj, filename):
+		"""Dump an object to a pickle file."""
+		mkdirs(os.path.dirname(filename))
+		with open(filename, "wb") as f:
+			pickle.dump(obj, f)
 
 	def __getitem__(self, idx):
 		"""Get the image and associated data for a given index."""
@@ -618,35 +666,33 @@ class DataManager:
 		"""
 		basename = self.basenames[idx]
 
-		if data_type == "image":
-			image = self.imread(self.paths[basename].image, hist_equalize=AUTO_CONTRAST)
+		if data_type not in DATA_TYPES:
+			raise ValueError(f"Invalid data type '{data_type}'. Valid types are: {', '.join(DATA_TYPES.keys())}.")
+
+		if data_type == "basename":
+			return basename
+
+		elif data_type == "image":
+			image = self._imread(self.paths[basename].image, auto_contrast=AUTO_CONTRAST)
 			return image
 
 		elif data_type == "labels":
 			if self.paths[basename].labels is None:
 				return None
-			labels = self.imread(self.paths[basename].labels).round().astype("uint8")
+			labels = self._imread(self.paths[basename].labels).round().astype("uint8")
 			return labels
 
 		elif data_type == "prob":
 			if self.paths[basename].prob is None:
 				return None
-			prob = tifffile.imread(self.paths[basename].prob)
+			prob = self._pickle_load(self.paths[basename].prob)
 			return prob
 
-		elif data_type == "model_out":
-			if self.paths[basename].model_out is None:
+		elif data_type == "cpsam_out":
+			if self.paths[basename].cpsam_out is None:
 				return None
-			with open(self.paths[basename].model_out, "rb") as f:
-				model_out = pickle.load(f)
-
-			model_out = dict_(
-					mask=model_out[0],
-					flow=model_out[1],
-					style=model_out[2],
-			)
-
-			return model_out
+			cpsam_out = self._pickle_load(self.paths[basename].cpsam_out)
+			return cpsam_out
 
 		else:
 			raise ValueError(f"Invalid data type '{data_type}'. Valid types are: {', '.join(DATA_TYPES.keys())}.")
@@ -669,7 +715,7 @@ class DataManager:
 		"""Get all images with associated labels."""
 		return [self[idx] for idx in range(self.num_samples) if self.has_labels(idx)]
 
-	def copy_images(self, dir_target):
+	def copy_images(self, dir_target, symlink=True):
 		"""
 		Copy images to a target directory.
 
@@ -677,44 +723,81 @@ class DataManager:
 		----------
 		dir_target : str
 			Path to the target directory where the images will be copied.
+		symlink : bool, optional
+			If True, create symbolic links to the images instead of copying them.
 
 		Returns
 		-------
 
 		"""
 
+		logger.info(f"Copying images to {dir_target}...")
+
 		for data_type, d in DATA_TYPES.items():
 			src = [os.path.join(self.dir_root, self.paths[basename][data_type]) for basename in self.paths if
 				self.paths[basename][data_type] is not None]
-			copy(src=src, dst=os.path.join(dir_target, d.dirname))
+			copy(src=src, dst=os.path.join(dir_target, d.dirname), symlink=symlink)
 
-	def fit(self):
+		logger.info(f"Images copied to {dir_target}.")
+
+	@_iterable_idx(tqdm_kw=dict(desc="Saving images", unit="image"))
+	def _save_images(self, idx=None, dir_target=None):
+		"""
+		Save images to a target directory.
+
+		Parameters
+		----------
+		idx : int, str, slice, Iterable[int], Iterable[str]
+			Index of the image to save.
+		dir_target : str
+			Path to the target directory where the images will be saved.
+
+		Returns
+		-------
+
+		"""
+		if dir_target is None:
+			dir_target = os.path.join(self.dir_root, "figs", "_images")
+
+		mkdirs(dir_target)
+
+		basename = self.basenames[idx]
+		image = self.get_data(idx=idx, data_type="image")
+		self._imwrite(image=image, filename=os.path.join(dir_target, basename + DATA_TYPES.image.ext))
+
+	def pixel_classifier_fit(self):
 		idx = [i for i in range(self.num_samples) if self.has_labels(i)]
 
 		images = self.get_data(idx=idx, data_type="image")
 		labels = self.get_data(idx=idx, data_type="labels")
+
+		if self.pixel_classifier is None:
+			self.pixel_classifier = RandomForestPixelClassifier()
+			logger.info(f"Creating new pixel classifier.")
+
 		self.pixel_classifier.fit(images=images, labels=labels)
 		return None
 
-	def save_pixel_classifier(self, filename=None):
+	def pixel_classifier_save(self, filename=None):
 		"""Save the pixel classifier to a file."""
 		if filename is None:
 			filename = os.path.join(self.dir_root, "pixel_classifier.pkl")
-		with open(filename, "wb") as f:
-			pickle.dump(self.pixel_classifier, f)
+		self._pickle_dump(self.pixel_classifier, filename)
 		logger.info(f"Pixel classifier saved to {filename}.")
 		return filename
 
 	@_iterable_idx(tqdm_kw=dict(desc="Predicting probabilities", unit="image"))
-	def predict_prob(self, idx=None, plot=False, **plot_kwargs):
+	def pixel_classifier_predict_prob(self, idx=None, plot=False, **plot_kwargs):
 		basename = self.basenames[idx]
 		image = self.get_data(idx=idx, data_type="image")
 
 		prob = self.pixel_classifier.predict_prob(images=image)
 
 		# save probabilities to file
-		filename = os.path.join(self.dir_root, "prob", basename + ".tif")
-		self.imwrite(image=prob, filename=filename)
+
+		filename = os.path.join(self.dir_root, DATA_TYPES.prob.dirname,
+				basename + DATA_TYPES.prob.ext)
+		self._pickle_dump(prob, filename)
 		logger.debug(f"Probabilities saved to {filename}.")
 
 		# update paths
@@ -731,7 +814,7 @@ class DataManager:
 
 		return prob
 
-	def predict(self, idx=None, plot=False, **plot_kwargs):
+	def pixel_classifier_predict(self, idx=None, plot=False, **plot_kwargs):
 		"""
 		Predict the most likely class for each pixel in the image.
 
@@ -749,50 +832,109 @@ class DataManager:
 		prob : ndarray
 			Predicted probabilities for each pixel in the image.
 		"""
-		prob = self.predict_prob(idx=idx, plot=plot, **plot_kwargs)
+		prob = self.pixel_classifier_predict_prob(idx=idx, plot=plot, **plot_kwargs)
 		return np.argmax(prob, axis=-1) + 1
 
-	@_iterable_idx(tqdm_kw=dict(desc="Predicting model masks", unit="image"))
-	def mask(self, idx=None):
+	@_iterable_idx(tqdm_kw=dict(desc="Predicting model masks", unit="image"), batch_size=CPSAM_EVAL_KW.batch_size)
+	def cpsam_mask(self, idx=None, plot=False, **plot_kwargs):
+		basenames = self.get_data(idx=idx, data_type="basename")
+		images = self.get_data(idx=idx, data_type="image")
+		if isinstance(idx, int):  # same as batch_size==1
+			basenames = [basenames]
+			images = [images]
 
-		if self.cellpose_model is None:
+		if self.cpsam is None:
+			time.sleep(0.1)
+			print()
 			logger.info("Loading cellpose model...")
 
 			import torch
 
 			device = torch.device("cuda" if torch.cuda.is_available() else "cpu")  # Use GPU if available, otherwise CPU
-			logger.info(f"Using device: {device}")
 
 			from cellpose import models
 
-			self.cellpose_model = models.CellposeModel(gpu=torch.cuda.is_available(), device=device)
-			logger.info("Cellpose model loaded.")
+			self.cpsam = models.CellposeModel(gpu=torch.cuda.is_available(), device=device)
+			logger.info("Loaded Cellpose model.")
 
-		# import ray
-		# ray.init(address='127.0.0.1:6379')
+			logger.info(f"Using device: {device}")
+
+			# import ray
+			# ray.init(address='127.0.0.1:6379')
+			pass
+
+		if not self._is_tqdm_running:
+			logger.info("Predicting model mask...")
+
+		cpsam_outs = self.cpsam.eval(x=images, **CPSAM_EVAL_KW)  # (mask, flow, style)
+		# Unfortunately, batching is done in each image separately, therefore there is no speedup in
+		# using batch_size > 1. DataManger is ready for batching, but the model is not.
+
+		if not self._is_tqdm_running:
+			logger.info("Model mask predicted.")
+
+		for basename, (mask, flow, style) in zip(basenames, (cpsam_outs[0], cpsam_outs[1], cpsam_outs[2])):
+			cpsam_out = CPSAMEvalOut(mask=mask, flow=flow, style=style)
+
+			# save mask to file
+			filename = os.path.join(self.dir_root, DATA_TYPES.cpsam_out.dirname,
+					basename + DATA_TYPES.cpsam_out.ext)
+			self._pickle_dump(cpsam_out, filename)
+			logger.debug(f"Model output saved to {filename}.")
+
+			# update paths
+			self.paths[basename].cpsam_out = filename
+
+			# update cache
+			if basename in self.cache:
+				data = self[basename]
+				data.cpsam_out = cpsam_out
+				self.cache.update(name=basename, item=data)
+
+			if plot:
+				self.plot_image_classification(idx, **plot_kwargs)
+
+		return cpsam_outs
+
+	@_iterable_idx(tqdm_kw=dict(desc="Plotting images", unit="image"))
+	def plot_image(self, idx=None,
+			save_fig=False, imshow_kw=None, **set_props_kw):
+		"""
+		Plot the image.
+
+		Parameters
+		----------
+		idx :           int, str, slice, Iterable[int], Iterable[str]
+			Index of the image to plot.
+		axs :           Axes or list[Axes]
+			Axes object to plot on. If given as a list, plots will be
+			[image] (or a part, depending on len(axs)).
+			If None, a new Axes object will be created.
+		save_fig :      bool, optional
+			If True, save the figure to a file.
+		imshow_kw :     dict, optional
+		**set_props_kw : dict, optional
+
+		Returns
+		-------
+
+		"""
+		if imshow_kw is None:
+			imshow_kw = dict()
 
 		basename = self.basenames[idx]
 		image = self.get_data(idx=idx, data_type="image")
-		model_out = self.cellpose_model.eval(x=image)  # mask, flow, style
-		model_out = list(model_out)
-		model_out[0] = model_out[0].astype("uint16")
 
-		# save mask to file
-		filename = os.path.join(self.dir_root, "model_out", basename + ".pkl")
-		mkdirs(os.path.dirname(filename))
-		with open(filename, "wb") as f:
-			pickle.dump(model_out, f)
-		logger.debug(f"Model output saved to {filename}.")
+		Ax = gr.Axes()
+		Ax.axs[0, 0].imshow(image, cmap="gray", **imshow_kw)
 
-		# update paths
-		self.paths[basename].model_out = filename
-		# update cache
-		if basename in self.cache:
-			data = self[basename]
-			data.model_out = model_out
-			self.cache.update(name=basename, item=data)
-
-		return model_out
+		set_props_kw = dict(
+				sup_title=f"{basename}",
+				show_fig=not save_fig,
+				save_file_name=os.path.join(self.dir_root, "figs", "images", basename) if save_fig else False,
+				close_fig=save_fig,
+		) | set_props_kw_image | set_props_kw
+		Ax.set_props(**set_props_kw)
 
 	@_iterable_idx(tqdm_kw=dict(desc="Plotting", unit="image"))
 	def plot_image_classification(self, idx=None,
@@ -825,11 +967,11 @@ class DataManager:
 			raise ValueError("`alpha` keyword argument is not supported. Define `alpha` in the __cfg__ file instead.")
 
 		data = self[idx]
-		basename, image, labels, prob, model_out = data.basename, data.image, data.labels, data.prob, data.model_out
+		basename, image, labels, prob, cpsam_out = data.basename, data.image, data.labels, data.prob, data.cpsam_out
 
 		mask, flow, style = None, None, None
-		if model_out is not None:
-			mask, flow, style = model_out.mask, model_out.flow, model_out.style
+		if cpsam_out is not None:
+			mask, flow, style = cpsam_out.mask, cpsam_out.flow, cpsam_out.style
 
 		if axs is None:  # create new axes
 			axs = gr.Axes(shape=(2, 4), figsize=(15, 8), grid_layout=[[(0, 2), (0, 2)]]).axs
@@ -847,6 +989,8 @@ class DataManager:
 
 		if not isinstance(axs, Iterable):
 			raise TypeError(f"`axs` must be an Axes object or a list of Axes objects (given {type(axs)} instead).")
+
+		axs_iter = iter(axs)
 
 		def plot_image(ax, image, cmap="gray", **imshow_kw):
 			if len(ax.images) == 0:
@@ -879,13 +1023,20 @@ class DataManager:
 				ax.images[-1].set_data(mask)
 
 		# 0: Image
-		ax = axs[0]
+		ax = next(axs_iter)
 		plot_image(ax, image, **imshow_kw)
 		ax.set_title("Image")
 
-		# 1: Predictions
+		# 1: Image + Predictions
+		ax = next(axs_iter)
 		if prob is not None:
-			ax = axs[1]
+			plot_image(ax, image, **imshow_kw)
+			plot_predictions(ax, prob, cmap=CMAP.rgba, **imshow_kw)
+			ax.set_title("Image + Predictions")
+
+		# 2: Predictions
+		ax = next(axs_iter)
+		if prob is not None:
 			plot_predictions(ax, prob, cmap=CMAP.rgb, **imshow_kw)
 			ax.set_title("Predictions")
 
@@ -900,25 +1051,18 @@ class DataManager:
 						labels=[f"{label_idx}: {label}" for (label, label_idx) in LABELS2IDX.items()],
 						fontsize=7, rotation=0, color="white")  # tick labels
 
-		# 2: Image + Probabilities
-		if prob is not None:
-			ax = axs[2]
-			plot_image(ax, image, **imshow_kw)
-			plot_predictions(ax, prob, cmap=CMAP.rgba, **imshow_kw)
-			ax.set_title("Image + Predictions")
-
-		# 3: Mask
+		# 3: Image + Mask
+		ax = next(axs_iter)
 		if mask is not None:
-			ax = axs[3]
-			plot_mask(ax, mask, cmap=CMAP.rgb_mask, **imshow_kw)
-			ax.set_title("Mask")
-
-		# 4: Image + Mask
-		if mask is not None:
-			ax = axs[4]
 			plot_image(ax, image, **imshow_kw)
 			plot_mask(ax, mask, cmap=CMAP.rgba_mask, **imshow_kw)
 			ax.set_title("Image + Mask")
+
+		# 4: Mask
+		ax = next(axs_iter)
+		if mask is not None:
+			plot_mask(ax, mask, cmap=CMAP.rgb_mask, **imshow_kw)
+			ax.set_title(f"Mask ({mask.max()} cells)")
 
 		Ax = gr.Axes(axs=axs)
 		set_props_kw = dict(
@@ -993,46 +1137,54 @@ class DataManager:
 			raise ValueError("Not all images have associated probabilities. Run `predict()` on all images first.")
 
 		# Calculate statistics
-		stats = dict_(
+		stats = Stats(
 				count=np.zeros(len(self)),
 				intensity=np.full((len(self), len(LABELS)), np.nan),
 				avg_area=np.full(len(self), np.nan),
 				avg_dist=np.full(len(self), np.nan),  # average distance between nuclei
 		)
+
 		logger.info("Calculating statistics...")
-		for idx in tqdm(range(len(self)), desc="Calculating statistics", unit="image"):
+		tqdm_kw = TQDM_KW | dict(desc="Calculating statistics", unit="image")
+		for idx in tqdm(range(len(self)), **tqdm_kw):
 			data = self[idx]
-			basename, image, labels, prob, model_out = data.basename, data.image, data.labels, data.prob, data.model_out
+			basename, image, labels, prob, cpsam_out = data.basename, data.image, data.labels, data.prob, data.cpsam_out
 			pred = np.argmax(prob, axis=-1) + 1
-			mask = model_out.mask
+			mask = cpsam_out.mask
 
-			for i, label_idx in enumerate(LABELS2IDX.values()):
-				stats.intensity[idx, i] = np.mean(image[pred == label_idx])
+			with warnings.catch_warnings():
+				warnings.filterwarnings("ignore", message="Mean of empty slice", category=RuntimeWarning)
+				warnings.filterwarnings("ignore", message="invalid value encountered in double_scalars",
+						category=RuntimeWarning)
 
-			props = regionprops(label_image=mask, intensity_image=image)
+				# Intensity
+				for i, label_idx in enumerate(LABELS2IDX.values()):
+					stats.intensity[idx, i] = np.mean(image[pred == label_idx])
 
-			count = len(props)
-			stats.count[idx] = count
+				# Region properties
+				props = regionprops(label_image=mask, intensity_image=image)
 
-			if count:
-				with warnings.catch_warnings():
-					warnings.simplefilter("ignore", category=RuntimeWarning)
+				# Count
+				count = len(props)
+				stats.count[idx] = count
 
+				if count:  # if there are any detected nuclei
+					# Average area
 					stats.avg_area[idx] = np.mean([p.area for p in props])
 
+					# Average distance
 					centroids = [p.centroid for p in props]
 					dist_mat = np.triu(distance_matrix(x=centroids, y=centroids), k=1)
 					stats.avg_dist[idx] = np.mean(dist_mat[dist_mat > 0])  # average distance between nuclei
 
 		logger.info("Finished calculating statistics.")
-		
+
 		def plot_xy(ax, x, y, title=None, xlabel=None, ylabel=None, ylim=None):
 			y = np.asarray(y)
 			if y.ndim == 1:
-				ax.plot(x, y, color=CMAP.rgb.colors[1])  # nuclei
+				ax.plot(x, y, color=CMAP.rgb.colors[LABELS2IDX.Nuclei - 1])  # Nuclei
 			else:
-				ax.plot(x, y)
-				ax.legend(LABELS, loc="upper right")
+				ax.plot(x, y)  # color cycler is set in `__cfg__.py`
 			ax.set_title(title)
 			ax.set_xlabel(xlabel)
 			ax.set_ylabel(ylabel)
@@ -1052,7 +1204,7 @@ class DataManager:
 		# Avg. Nuclei Intensity vs. Time
 		plot_xy(ax=next(axs_iter),
 				x=x, y=stats.intensity,
-				title="Average Nuclei Intensity",
+				title="Avg. Nuclei Intensity",
 				xlabel="Image Index",
 				ylabel="Average Intensity",
 				ylim=[0, None])
@@ -1060,7 +1212,7 @@ class DataManager:
 		# Avg. Nuclei Area vs. Time
 		plot_xy(ax=next(axs_iter),
 				x=x, y=stats.avg_area,
-				title="Average Nuclei Area",
+				title="Avg. Nuclei Area",
 				xlabel="Image Index",
 				ylabel="Area [pixels]",
 				ylim=[0, None])
@@ -1068,7 +1220,7 @@ class DataManager:
 		# Average Nuclei Distance vs. Time
 		plot_xy(ax=next(axs_iter),
 				x=x, y=stats.avg_dist,
-				title="Average Nuclei Distance",
+				title="Avg. Nuclei Distance",
 				xlabel="Image Index",
 				ylabel="Distance [pixels]",
 				ylim=[0, None])
@@ -1077,6 +1229,7 @@ class DataManager:
 		# raise NotImplementedError  # todo:
 
 		Ax = gr.Axes(axs=axs)
+		Ax.fig.legend(handles=axs[1].get_lines(), labels=LABELS, loc="upper right", ncol=len(LABELS), fontsize=10)
 		set_props_kw = dict(
 				sup_title=f"Pixel Classifier Statistics",
 				show_fig=not save_fig,

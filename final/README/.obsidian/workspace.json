@@ -1,0 +1,181 @@
+{
+  "main": {
+    "id": "67b7f52f2ad88daa",
+    "type": "split",
+    "children": [
+      {
+        "id": "7902e022a0ac4d2b",
+        "type": "tabs",
+        "children": [
+          {
+            "id": "dc13b9ee11b1d144",
+            "type": "leaf",
+            "state": {
+              "type": "markdown",
+              "state": {
+                "file": "β-Catenin Nuclei Signal During Hydra Regeneration.md",
+                "mode": "source",
+                "source": false
+              },
+              "icon": "lucide-file",
+              "title": "β-Catenin Nuclei Signal During Hydra Regeneration"
+            }
+          }
+        ]
+      }
+    ],
+    "direction": "vertical"
+  },
+  "left": {
+    "id": "88ce9f45ec7532d1",
+    "type": "split",
+    "children": [
+      {
+        "id": "4aec801a9c59e620",
+        "type": "tabs",
+        "children": [
+          {
+            "id": "2478766a68ecbeb3",
+            "type": "leaf",
+            "state": {
+              "type": "file-explorer",
+              "state": {
+                "sortOrder": "alphabetical",
+                "autoReveal": false
+              },
+              "icon": "lucide-folder-closed",
+              "title": "Files"
+            }
+          },
+          {
+            "id": "6c6fe64c44bdde49",
+            "type": "leaf",
+            "state": {
+              "type": "search",
+              "state": {
+                "query": "",
+                "matchingCase": false,
+                "explainSearch": false,
+                "collapseAll": false,
+                "extraContext": false,
+                "sortOrder": "alphabetical"
+              },
+              "icon": "lucide-search",
+              "title": "Search"
+            }
+          },
+          {
+            "id": "7226f9c14e3625be",
+            "type": "leaf",
+            "state": {
+              "type": "bookmarks",
+              "state": {},
+              "icon": "lucide-bookmark",
+              "title": "Bookmarks"
+            }
+          }
+        ]
+      }
+    ],
+    "direction": "horizontal",
+    "width": 300
+  },
+  "right": {
+    "id": "ab55724f0c203da4",
+    "type": "split",
+    "children": [
+      {
+        "id": "d54571a95abff1ae",
+        "type": "tabs",
+        "children": [
+          {
+            "id": "64d760fd3080400d",
+            "type": "leaf",
+            "state": {
+              "type": "backlink",
+              "state": {
+                "file": "README.md",
+                "collapseAll": false,
+                "extraContext": false,
+                "sortOrder": "alphabetical",
+                "showSearch": false,
+                "searchQuery": "",
+                "backlinkCollapsed": false,
+                "unlinkedCollapsed": true
+              },
+              "icon": "links-coming-in",
+              "title": "Backlinks for README"
+            }
+          },
+          {
+            "id": "14213ffaf1e3bc88",
+            "type": "leaf",
+            "state": {
+              "type": "outgoing-link",
+              "state": {
+                "file": "README.md",
+                "linksCollapsed": false,
+                "unlinkedCollapsed": true
+              },
+              "icon": "links-going-out",
+              "title": "Outgoing links from README"
+            }
+          },
+          {
+            "id": "f83f52aa901d4368",
+            "type": "leaf",
+            "state": {
+              "type": "tag",
+              "state": {
+                "sortOrder": "frequency",
+                "useHierarchy": true,
+                "showSearch": false,
+                "searchQuery": ""
+              },
+              "icon": "lucide-tags",
+              "title": "Tags"
+            }
+          },
+          {
+            "id": "5680476625e6d16a",
+            "type": "leaf",
+            "state": {
+              "type": "outline",
+              "state": {
+                "file": "README.md",
+                "followCursor": false,
+                "showSearch": false,
+                "searchQuery": ""
+              },
+              "icon": "lucide-list",
+              "title": "Outline of README"
+            }
+          }
+        ]
+      }
+    ],
+    "direction": "horizontal",
+    "width": 300,
+    "collapsed": true
+  },
+  "left-ribbon": {
+    "hiddenItems": {
+      "markdown-importer:Open format converter": false,
+      "audio-recorder:Start/stop recording": false,
+      "switcher:Open quick switcher": false,
+      "graph:Open graph view": false,
+      "canvas:Create new canvas": false,
+      "daily-notes:Open today's daily note": false,
+      "templates:Insert template": false,
+      "command-palette:Open command palette": false
+    }
+  },
+  "active": "dc13b9ee11b1d144",
+  "lastOpenFiles": [
+    "Pasted image 20250705122447.png",
+    "β-Catenin Nuclei Signal During Hydra Regeneration.md",
+    "Pasted image 20250705122007.png",
+    "2025_03_05__View1__4_beta_cat25X_TL_T9_C1.png",
+    "2025_03_05__View1__4_beta_cat25X_TL_T9_C1.tif"
+  ]
+}
