@@ -2,7 +2,7 @@ import os
 import tempfile
 import pandas as pd
 
-from __cfg__ import logger
+from __cfg__ import logger, DATA_TYPES
 
 
 def file_exist(path):
@@ -18,7 +18,7 @@ def dir_exist(path):
 
 
 def symlink_admin_priv():
-	"""Tests if the given path is a symlink and if it requires admin privileges to access."""
+	"""Checks if the given path is a symlink and if it requires admin privileges to access."""
 	with tempfile.TemporaryDirectory() as temp_dir:
 		# Create a symlink in the temporary directory
 		try:
@@ -39,3 +39,11 @@ def excel_permissions(path_excel):
 	except PermissionError:
 		logger.error(f"Permission error. Make sure to close the Excel file before running the script.")
 		raise
+
+
+def data_type_valid(data_type):
+	"""Checks if given data type is valid"""
+	if data_type not in DATA_TYPES:
+		msg = f"Invalid data type '{data_type}'. Valid types are: {', '.join(DATA_TYPES.keys())}."
+		logger.error(msg)
+		raise ValueError(msg)

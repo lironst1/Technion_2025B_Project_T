@@ -1,13 +1,13 @@
 import os
 import numpy as np
-import matplotlib.pyplot as plt
-import napari
 import tifffile
 from natsort import natsorted
 from tqdm import tqdm
+# import napari
 
-from __cfg__ import IMAGE_EXTENSIONS, CMAP, logger
+from __cfg__ import logger
 from utils import is_image
+
 
 # viewer.layers["Labels"].data.shape
 
@@ -37,30 +37,30 @@ def split_labels_tif(filename_labels, dir_labeled_images, dir_target):
 	-------
 
 	"""
-    # Load the 3D label tif file
-    labels_3d = tifffile.imread(filename_labels)
+	# Load the 3D label tif file
+	labels_3d = tifffile.imread(filename_labels)
 
-    # Get sorted list of image filenames in the original image directory
+	# Get a sorted list of image filenames in the original image directory
 	filenames = os.listdir(dir_labeled_images)
 	filenames = natsorted([f.replace(".lnk", "") for f in filenames if is_image(f)])
 
-    # Check that the number of slices matches number of images
+	# Check that the number of slices matches the number of images
 	if len(filenames) != labels_3d.shape[0]:
 		raise ValueError(f"Number of slices in labels file ({labels_3d.shape[0]}) "
 		                 f"does not match number of images ({len(filenames)}).")
 
-    # Ensure output directory exists
-    os.makedirs(dir_target, exist_ok=True)
+	# Ensure output directory exists
+	os.makedirs(dir_target, exist_ok=True)
 
-    # Iterate over each slice
+	# Iterate over each slice
 	for i, filename in tqdm(enumerate(filenames), total=len(filenames), desc="Processing slices"):
-        label_slice = labels_3d[i]
+		label_slice = labels_3d[i]
 
-        if np.any(label_slice):  # Save only if there are non-zero labels
-	        filename_out = os.path.join(dir_target, filename)
-	        if os.path.exists(filename_out):
-		        logger.warning(f"File {filename_out} already exists. Skipping.")
-                continue
-	        tifffile.imwrite(filename_out, label_slice)
+		if np.any(label_slice):  # Save only if there are non-zero labels
+			filename_out = os.path.join(dir_target, filename)
+			if os.path.exists(filename_out):
+				logger.warning(f"File {filename_out} already exists. Skipping.")
+				continue
+			tifffile.imwrite(filename_out, label_slice)
 
-    logger.info("Label splitting completed.")
+	logger.info("Label splitting completed.")
