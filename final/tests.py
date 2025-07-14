@@ -35,7 +35,7 @@ def symlink_admin_priv():
 def excel_permissions(path_excel):
 	"""Tests if the user has permissions to access Excel files."""
 	try:
-		excel_data = pd.read_excel(path_excel)
+		pd.read_excel(path_excel)
 	except PermissionError:
 		logger.error(f"Permission error. Make sure to close the Excel file before running the script.")
 		raise

@@ -19,6 +19,7 @@ from utils import is_image
 # )
 # viewer.add_image()
 
+# todo: add a way to open a random sample, label it, and save the labels back in the original path
 
 def split_labels_tif(filename_labels, dir_labeled_images, dir_target):
 	"""
