@@ -3,6 +3,8 @@ import time
 import warnings
 import random
 import functools
+from threading import Thread
+from multiprocessing import Process
 from collections import defaultdict
 from pathlib import Path
 from collections.abc import Iterable
@@ -16,14 +18,15 @@ from scipy.spatial import distance_matrix
 from prettytable import PrettyTable
 
 from liron_utils.files import copy
-from liron_utils.pure_python import dict_, NamedQueue, parallel_threading, tqdm_
+from liron_utils.pure_python import dict_, NamedQueue, parallel_threading, tqdm_, is_debugger
 from liron_utils.files import mkdirs
 from liron_utils import graphics as gr
 
-from __cfg__ import logger, AUTO_CONTRAST, set_props_kw_image, CMAP, DATA_TYPES, CPSAMEvalOut, Stats, \
-    CPSAM_EVAL_KW, get_tqdm_kw, CACHE_SIZE, DIR_OUTPUT
+from __cfg__ import logger, AUTO_CONTRAST, set_props_kw_image, LABELS, CMAP, DATA_TYPES, Stats, \
+    CPSAM_EVAL_KW, CPSAMEvalOut, get_tqdm_kw, CACHE_SIZE, DIR_OUTPUT, DEBUG
 from utils import imread, imwrite, pickle_load, pickle_dump, ExcelData, get_image_paths
 from utils_pixel_classifier import RandomForestPixelClassifier
+from utils_napari import open_gui_for_segmentation
 import tests
 
 
@@ -329,7 +332,9 @@ class DataManager:
         """
         basename = self.basenames[idx]
 
-        if data_type == "basename":
+        if data_type == "idx":
+            return idx
+        elif data_type == "basename":
             return basename
 
         tests.data_type_valid(data_type)
@@ -464,7 +469,7 @@ class DataManager:
     def pixel_classifier_save(self, filename=None):
         """Save the pixel classifier to a file."""
         if filename is None:
-            filename = os.path.join(self.dir_root, "pixel_classifier.pkl")
+            filename = os.path.join(self.dir_root, DIR_OUTPUT, "pixel_classifier.pkl")
         return self.pixel_classifier.save_model(filename=filename)
 
     @_iterable_idx(tqdm_kw=dict(desc="Predicting probabilities", unit="image"))
@@ -800,23 +805,23 @@ class DataManager:
                 ax.images[0].set_data(image)
 
         def plot_probabilities(ax, prob, cmap, **imshow_kw):
-            X = np.einsum("...i,ij->...j", prob, np.array(cmap.colors))
+            prob_color = np.einsum("...i,ij->...j", prob, np.array(cmap.colors))
 
             if len(ax.images) < 2:
-                ax.imshow(X, cmap=cmap, **imshow_kw)
+                ax.imshow(prob_color, cmap=cmap, **imshow_kw)
             else:
-                ax.images[-1].set_data(X)
+                ax.images[-1].set_data(prob_color)
 
         def plot_predictions(ax, prob, cmap, **imshow_kw):
-            X = np.argmax(prob, axis=-1) + 1
+            pred = np.argmax(prob, axis=-1) + 1  # (0=unlabeled, 1=label1, 2=label2, ...)
 
             if len(ax.images) < 2:
-                ax.imshow(X, cmap=cmap, **imshow_kw)
+                ax.imshow(pred, cmap=cmap, **imshow_kw)
             else:
-                ax.images[-1].set_data(X)
+                ax.images[-1].set_data(pred)
 
         def plot_mask(ax, mask, cmap, **kwargs):
-            mask = mask > 0  # convert to binary mask
+            mask = mask > 0  # convert to binary mask (0=background, 1=nuclei)
 
             if len(ax.images) < 2:
                 ax.imshow(mask, cmap=cmap, **kwargs)
@@ -946,7 +951,7 @@ class DataManager:
 
         # Calculate statistics
         stats = Stats(
-                count=np.zeros(len(self), dtype=int),  # number of detected nuclei
+                count=np.zeros(len(self), dtype="uint16"),  # number of detected nuclei
                 avg_intensity=np.full(len(self), np.nan),  # average intensity
                 avg_area=np.full(len(self), np.nan),  # average nuclei area
                 sum_area_intensity=np.full(len(self), np.nan),  # sum of area * intensity
@@ -1127,3 +1132,39 @@ class DataManager:
                     close_fig=save_fig,
             ) | set_props_kw
             Ax.set_props(**set_props_kw)
+
+    def segment_in_napari(self, idx=None):
+        basenames = self.get_data(idx=idx, data_type="basename")
+
+        logger.info("Loading images...")
+        images = np.array(self.get_data(idx=idx, data_type="image"))
+
+        logger.info("Loading labels...")
+        labels = self.get_data(idx=idx, data_type="labels")
+        for i, label in enumerate(labels):
+            if label is None:
+                labels[i] = np.zeros(images[i].shape, dtype="uint8")
+        labels = np.array(labels)
+
+        logger.info("Loading masks...")
+        cpsam_outs = self.get_data(idx=idx, data_type="cpsam_out")
+        masks = np.zeros(images.shape, dtype="uint16")
+        for i, cpsam_out in enumerate(cpsam_outs):
+            if cpsam_out is not None:
+                mask = cpsam_out.mask
+                mask[mask > 0] = LABELS.nuclei.idx_napari
+                masks[i] = mask
+
+        open_gui_for_labeling_kw = dict(
+                dir_root=self.dir_root,
+                basenames=basenames,
+                images=images,
+                labels=labels,
+                masks=masks,
+        )
+        if is_debugger and not DEBUG:  # open GUI in a separate process
+            logger.info(f"Opening labeling GUI in a separate process...")
+            Process(daemon=False, target=open_gui_for_segmentation, kwargs=open_gui_for_labeling_kw).start()
+        else:
+            logger.info(f"Opening labeling GUI...")
+            open_gui_for_segmentation(**open_gui_for_labeling_kw)

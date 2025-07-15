@@ -97,12 +97,6 @@ class ExcelData:
                              "'beta_catenin_intensity' must have the same length.")
 
 
-# if not all((self.initial_frame_beta_catenin[1:] - self.final_frame_beta_catenin[:-1]) == 1):
-# 	raise ValueError("Excel data columns 'initial_frame_beta_catenin' and 'final_frame_beta_catenin' must "
-# 	                 "have consecutive frames (i.e., final frame of one row should be the initial frame of the "
-# 	                 "next row).")
-
-
 def flatten_image_tree(dir_root, dir_target=None, path_excel=None, date=None, view=None, sep="__", overwrite=False,
         symlink=True):
     """
@@ -246,7 +240,7 @@ def imread(filename, auto_contrast=False):
         alpha = clip_value / (maximum_gray - minimum_gray)
         beta = -minimum_gray * alpha
 
-        out = image.astype(np.float64) * alpha + beta
+        out = image.astype(float) * alpha + beta
         out = np.clip(out, 0, clip_value).astype(f"uint{bit_depth}")
         return out
 
@@ -271,7 +265,7 @@ def imwrite(image, filename):
 def pickle_load(filename):
     """Load a pickle file."""
     with open(filename, "rb") as f:
-        return pickle.load(f)
+        return pickle.load(f, fix_imports=True, encoding="latin1")
 
 
 def pickle_dump(obj, filename):

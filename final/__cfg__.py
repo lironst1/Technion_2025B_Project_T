@@ -10,7 +10,7 @@ from liron_utils.pure_python import Logger
 from liron_utils.pure_python import dict_
 
 # TODO:
-#   - requirements.txt
+#   - requirements.txt (create empty venv and install the packages)
 #   - README.md
 
 gr.update_rcParams("liron_utils-article")
@@ -33,7 +33,7 @@ gr.update_rcParams({
 })
 
 # %% Debug
-DEBUG = False
+DEBUG = True
 SEED = 0  # Use a fixed seed for reproducibility in tests (used only if DEBUG is True)
 
 # %% Paths
@@ -138,29 +138,49 @@ class CPSAMEvalOut:
 # %% Ilastik
 PATH_ILASTIK_EXE = r"C:\Program Files\ilastik-1.4.1rc2-gpu\ilastik.exe"  # Path to the Ilastik's 'run_ilastik.bat' script used for headless processing
 
+
 # %% Napari
-pass
+class SegmentationLabel:
+    """Container for labels and their properties."""
+
+    def __init__(self, idx_napari, color, alpha=1.0):
+        self.idx_napari = idx_napari
+        self.color = color  # Color of the label in RGB format
+        self.alpha = alpha  # Transparency of the label (0.0 - fully transparent, 1.0 - fully opaque)
+
+    def __repr__(self):
+        return f"SegmentationLabel(idx_napari={self.idx_napari}, color={self.color}, alpha={self.alpha})"
+
+
+LABELS = dict_(
+        background=SegmentationLabel(idx_napari=1, color=(0.471, 0.145, 0.024), alpha=0.00),
+        nuclei=SegmentationLabel(idx_napari=2, color=(0.357, 0.835, 0.973), alpha=0.90),
+        hydra=SegmentationLabel(idx_napari=3, color=(0.573, 0.537, 0.910), alpha=0.00),
+        dirt=SegmentationLabel(idx_napari=4, color=(0.424, 0.008, 0.757), alpha=0.00),
+)
 
 # %% Plots
 IMAGE_EXTENSIONS = {'.jpg', '.jpeg', '.png', '.bmp', '.gif', '.tif', '.tiff'}
 
 set_props_kw_image = dict(axis="image", ticks=False, xy_lines=False)
 
-LABELS = ["Background", "Nuclei", "Hydra", "Dirt"]
-LABELS2IDX = dict_(zip(LABELS, range(1, len(LABELS) + 1)))
+
+def get_cmap(labels=None, alpha=False):
+    """Return a colormap for the given labels."""
+    if labels is None:
+        labels = list(LABELS.values())
+    if alpha:
+        return ListedColormap(np.vstack([np.hstack([label.color, [label.alpha]]) for label in labels]))
+    else:
+        return ListedColormap(np.vstack([label.color for label in labels]))
+
 
 CMAP = dict_(
-        rgba=ListedColormap(np.array([
-            # [R, G, B, alpha]
-            [0.471, 0.145, 0.024, 0.00],  # Background
-            [0.357, 0.835, 0.973, 0.90],  # Nuclei
-            [0.573, 0.537, 0.910, 0.00],  # Hydra
-            [0.424, 0.008, 0.757, 0.00],  # Dirt
-        ])),
+        rgb=get_cmap(),  # 1=background, 2=nuclei, 3=hydra, 4=dirt
+        rgba=get_cmap(alpha=True),  # 1=background, 2=nuclei, 3=hydra, 4=dirt
+        rgb_mask=get_cmap(labels=[LABELS.background, LABELS.nuclei]),  # 0=background, 1=nuclei
+        rgba_mask=get_cmap(labels=[LABELS.background, LABELS.nuclei], alpha=True),  # 0=background, 1=nuclei
 )
-CMAP.rgb = ListedColormap(CMAP.rgba.colors[:, :3])
-CMAP.rgba_mask = ListedColormap(CMAP.rgba.colors[:2, :])
-CMAP.rgb_mask = ListedColormap(CMAP.rgba.colors[:2, :3])
 
 
 class Stats:
@@ -196,5 +216,6 @@ logger = Logger(
 
 # %% Random seed
 if DEBUG:
+    logger.info(f"Running in DEBUG mode with seed {SEED}.")
     np.random.seed(SEED)
     random.seed(SEED)
