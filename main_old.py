@@ -5,20 +5,21 @@ import matplotlib.pyplot as plt
 
 from liron_utils import graphics as gr
 
-from __cfg__ import get_path, logger
-from utils import flatten_image_tree
+from utils import flatten_image_tree, get_image_paths
 from utils_data_manager import DataManager
-from utils import get_image_paths
 
 # from utils_napari import split_labels_tif
 
 
 if __name__ == "__main__":
+    PATH_DATA = r"C:\Users\liron\OneDrive - Technion\Homework\2025B\114252 - Project T\Data"  # Path to the data directory
+    get_path = lambda *args: os.path.join(PATH_DATA, *args)
+
     # flatten_image_tree(
     # 		dir_root=get_path("original"),
     # 		dir_target=get_path("2025_03_05", "data"),
     # 		date="2025_03_05",
-    # 		view=1,
+    # 		pos=1,
     # 		# path_excel=get_path("betacatenin_head.xlsx"),
     # )
     # print_image_tree(get_path(r"original"))
@@ -29,11 +30,11 @@ if __name__ == "__main__":
 
     # file_pkl = get_path("all_head", "pixel_classifier.pkl")
 
-    for date, view in [("2025_03_05", 1)]:  # , ("2025_01_29", 1), ("2025_02_27", 1)]:
-        print(f"Processing date: {date}, view: {view}")
-        dm = DataManager(dir_root=get_path(rf"original\{date}\View{view}"),
+    for date, pos in [("2025_03_05", 1)]:  # , ("2025_01_29", 1), ("2025_02_27", 1)]:
+        print(f"Processing date: {date}, pos: {pos}")
+        dm = DataManager(dir_root=get_path(rf"original\{date}\View{pos}"),
                 path_excel=get_path("betacatenin_head.xlsx"),
-                date=date, view=view
+                date=date, pos=pos
         )
         dm.segment_in_napari()
         # cpsam_out = dm.get_data(55, "cpsam_out")

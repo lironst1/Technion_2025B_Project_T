@@ -3,7 +3,6 @@ import time
 import warnings
 import random
 import functools
-from threading import Thread
 from multiprocessing import Process
 from collections import defaultdict
 from pathlib import Path
@@ -54,7 +53,7 @@ class DataManager:
     """
 
     def __init__(self, dir_root, *,
-            labeled=None, sample_size=None, path_excel=None, date=None, view=None,
+            labeled=None, sample_size=None, path_excel=None, date=None, pos=None,
             random_forest_pixel_classifier=None):
 
         tests.dir_exist(dir_root)
@@ -74,10 +73,10 @@ class DataManager:
             self._intensity_excel = None
 
         else:
-            if date is None or view is None:
-                raise ValueError("If `path_excel` is given, both `date` and `view` must be specified.")
+            if date is None or pos is None:
+                raise ValueError("If `path_excel` is given, both `date` and `pos` must be specified.")
 
-            excel_data = ExcelData(path_excel, num_samples=self.num_samples, date=date, view=view)
+            excel_data = ExcelData(path_excel, num_samples=self.num_samples, date=date, pos=pos)
 
             self.basenames = self.basenames[excel_data.min_frame:excel_data.max_frame + 1]
             self.paths = dict_(**{basename: self.paths[basename] for basename in self.basenames})

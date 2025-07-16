@@ -1,8 +1,7 @@
 import os
 import random
-
-import matplotlib.pyplot as plt
 import numpy as np
+import matplotlib.pyplot as plt
 from matplotlib.colors import ListedColormap
 
 from liron_utils import graphics as gr
@@ -10,7 +9,6 @@ from liron_utils.pure_python import Logger
 from liron_utils.pure_python import dict_
 
 # TODO:
-#   - requirements.txt (create empty venv and install the packages)
 #   - README.md
 
 gr.update_rcParams("liron_utils-article")
@@ -33,13 +31,10 @@ gr.update_rcParams({
 })
 
 # %% Debug
-DEBUG = True
-SEED = 0  # Use a fixed seed for reproducibility in tests (used only if DEBUG is True)
+DEBUG = False  # Controls logger level and random seed (debugging can still be achieved with the `--debug` flag)
+SEED = 0  # Use a fixed seed for reproducibility in tests (used only if DEBUG is True or with `--debug` flag)
 
 # %% Paths
-PATH_DATA = r"C:\Users\liron\OneDrive - Technion\Homework\2025B\114252 - Project T\Data"  # Path to the data directory
-get_path = lambda *args: os.path.join(PATH_DATA, *args)
-
 EXCEL_COLUMNS = dict_(
         date="Date",
         pos="Pos",
@@ -55,6 +50,7 @@ DIR_OUTPUT = "output"
 
 
 class DataType:
+    """Container for data type information."""
     def __init__(self, dirname, ext):
         self.dirname = dirname  # Directory name relative to the root directory
         self.ext = ext  # File extension
@@ -128,7 +124,6 @@ CPSAM_EVAL_KW = dict_(
 
 class CPSAMEvalOut:
     """Container for Cellpose model output."""
-
     def __init__(self, mask, flow, style):
         self.mask = mask.astype("uint16")
         self.flow = flow
@@ -142,7 +137,6 @@ PATH_ILASTIK_EXE = r"C:\Program Files\ilastik-1.4.1rc2-gpu\ilastik.exe"  # Path 
 # %% Napari
 class SegmentationLabel:
     """Container for labels and their properties."""
-
     def __init__(self, idx_napari, color, alpha=1.0):
         self.idx_napari = idx_napari
         self.color = color  # Color of the label in RGB format
@@ -185,7 +179,6 @@ CMAP = dict_(
 
 class Stats:
     """Container for nuclei statistics."""
-
     def __init__(self, count, avg_intensity, avg_area, sum_area_intensity, avg_dist, intensity_excel):
         self.count = count
         self.avg_intensity = avg_intensity

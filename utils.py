@@ -14,7 +14,7 @@ from liron_utils.files import copy
 from liron_utils.files import open_file, mkdirs
 from liron_utils.pure_python import dict_
 
-from __cfg__ import logger, IMAGE_EXTENSIONS, DATA_TYPES, get_tqdm_kw, EXCEL_COLUMNS, AUTO_CONTRAST_KW, IGNORED_DIRS
+from __cfg__ import logger, DEBUG, DIR_OUTPUT, IMAGE_EXTENSIONS, DATA_TYPES, get_tqdm_kw, EXCEL_COLUMNS, AUTO_CONTRAST_KW, IGNORED_DIRS
 import tests
 
 
@@ -40,7 +40,7 @@ def ignore_nan(x):
 class ExcelData:
     """Container for Excel data."""
 
-    def __init__(self, path_excel, num_samples, date=None, view=None):
+    def __init__(self, path_excel, num_samples, date=None, pos=None):
         excel_data = read_excel(path_excel)
 
         excel_data[EXCEL_COLUMNS.date] = pd.to_datetime(excel_data[EXCEL_COLUMNS.date], format="%d.%m.%y").ffill()
@@ -49,13 +49,13 @@ class ExcelData:
         # Filter frames by final frame of beta-catenin
         if isinstance(date, str):
             date = pd.to_datetime(date, format="%Y_%m_%d")
-        if isinstance(view, str):
-            view = int(view.lower().split("view")[-1])
+        if isinstance(pos, str):
+            pos = int(pos.lower().replace("view", "").replace("pos", ""))
 
-        excel_data = excel_data[(excel_data[EXCEL_COLUMNS.date] == date) & (excel_data[EXCEL_COLUMNS.pos] == view)]
+        excel_data = excel_data[(excel_data[EXCEL_COLUMNS.date] == date) & (excel_data[EXCEL_COLUMNS.pos] == pos)]
         if excel_data.empty:
             logger.warning(f"No matching rows found in Excel file for "
-                           f"date {date.strftime('%Y_%m_%d')} and view {view}.")
+                           f"date {date.strftime('%Y_%m_%d')} and pos {pos}.")
 
         excel_data = dict_(**{k: excel_data[v].to_numpy() for k, v in EXCEL_COLUMNS.items()})
 
@@ -97,7 +97,7 @@ class ExcelData:
                              "'beta_catenin_intensity' must have the same length.")
 
 
-def flatten_image_tree(dir_root, dir_target=None, path_excel=None, date=None, view=None, sep="__", overwrite=False,
+def flatten_image_tree(dir_root, dir_target=None, path_excel=None, date=None, pos=None, sep="__", overwrite=False,
         symlink=True):
     """
     Move images from a directory tree to a single directory and rename them accordingly.
@@ -140,8 +140,8 @@ def flatten_image_tree(dir_root, dir_target=None, path_excel=None, date=None, vi
         │   │   │   │   ├── <image_name>.tif
     date :                str, optional
         Date to filter images by. If provided, only images from this date will be copied.
-    view :                int, optional
-        View number to filter images by. If provided, only images from this view will be copied.
+    pos :                int, optional
+        Position number to filter images by. If provided, only images from this position will be copied.
     sep :                 str, optional
         Separator used to join the directory names and image names in the target directory. Default is '__'.
     overwrite, symlink :    bool, optional
@@ -172,7 +172,7 @@ def flatten_image_tree(dir_root, dir_target=None, path_excel=None, date=None, vi
             continue  # should have ./<date>/<View#>
 
         dir_cur_data_date = pd.to_datetime(dir_cur_list[0], format="%Y_%m_%d")
-        dir_cur_data_view = int(dir_cur_list[1].lower().split("view")[-1])
+        dir_cur_data_pos = int(dir_cur_list[1].lower().replace("view", "").replace("pos", ""))
 
         if date is not None:  # Filter based on date
             if isinstance(date, str):
@@ -180,24 +180,24 @@ def flatten_image_tree(dir_root, dir_target=None, path_excel=None, date=None, vi
             if dir_cur_data_date != date:
                 continue
 
-        if view is not None:  # Filter based on view
-            if isinstance(view, str):
-                view = int(view.lower().split("view")[-1])
-            if dir_cur_data_view != view:
+        if pos is not None:  # Filter based on position
+            if isinstance(pos, str):
+                pos = int(pos.lower().replace("view", "").replace("pos", ""))
+            if dir_cur_data_pos != pos:
                 continue
 
         if excel_data is not None:  # Filter based on Excel data
-            # Check if the current date and view match any rows in the Excel data
+            # Check if the current date and pos match any rows in the Excel data
             matching_rows = excel_data[excel_data[EXCEL_COLUMNS.date] == dir_cur_data_date]
             if matching_rows.empty:
                 logger.warning(f"No matching rows found in Excel file for "
                                f"date {dir_cur_data_date.strftime('%Y_%m_%d')}.")
                 continue
 
-            matching_rows = matching_rows[matching_rows[EXCEL_COLUMNS.pos] == dir_cur_data_view]
+            matching_rows = matching_rows[matching_rows[EXCEL_COLUMNS.pos] == dir_cur_data_pos]
             if matching_rows.empty:
                 logger.warning(f"No matching rows found in Excel file for "
-                               f"date {dir_cur_data_date.strftime('%Y_%m_%d')} and view {dir_cur_data_view}.")
+                               f"date {dir_cur_data_date.strftime('%Y_%m_%d')} and pos {dir_cur_data_pos}.")
                 continue
 
             max_frame = int(matching_rows[EXCEL_COLUMNS.final_frame_beta_catenin].max())
