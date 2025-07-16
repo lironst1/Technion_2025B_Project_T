@@ -154,7 +154,7 @@ LABELS = dict_(
 )
 
 # %% Plots
-IMAGE_EXTENSIONS = {'.jpg', '.jpeg', '.png', '.bmp', '.gif', '.tif', '.tiff'}
+IMAGE_EXTENSIONS = {'.tif', '.tiff'}  # '.jpg', '.jpeg', '.png', '.bmp', '.gif'
 
 set_props_kw_image = dict(axis="image", ticks=False, xy_lines=False)
 

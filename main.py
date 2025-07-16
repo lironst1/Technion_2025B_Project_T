@@ -9,10 +9,24 @@ import __cfg__
 from __cfg__ import logger
 
 
-def tuple_type(strings):
-    strings = strings.replace("(", "").replace(")", "")
-    mapped_int = map(int, strings.split(","))
-    return tuple(mapped_int)
+def to_tuple(strings: str, dtype: type):
+    if strings.startswith("(") or strings.endswith("["):
+        strings = strings[1]
+    if strings.endswith(")") or strings.endswith("]"):
+        strings = strings[:-1]
+
+    strings = [s.strip() for s in strings.split(",")]
+
+    out = tuple(map(dtype, strings))
+    return out
+
+
+def to_tuple_int(strings: str):
+    return to_tuple(strings, int)
+
+
+def to_tuple_str(strings: str):
+    return to_tuple(strings, str)
 
 
 def parse_args():
@@ -29,7 +43,7 @@ def parse_args():
             "-d",
             "--dir",
             type=str,
-            default=".",
+            default="example",
             help=f"Path to a directory containing the images. "
                  f"Default is the current directory. "
                  f"Output will be saved in a subdirectory named '{__cfg__.DIR_OUTPUT}'. "
@@ -57,7 +71,7 @@ def parse_args():
             "-o",
             "--output",
             type=str,
-            default=None,
+            default=__cfg__.DIR_OUTPUT,
             help="Path to the output directory where results will be saved. "
                  "If not specified, outputs will be saved in a subdirectory named 'output' in the current directory. "
                  "If output directory already exists, the script will read existing values from it for processing (if they exist). "
@@ -76,7 +90,7 @@ def parse_args():
 
     parser.add_argument(
             "--date",
-            type=str,
+            type=to_tuple_str,
             help=f"Date of the experiment in the format 'YYYY-MM-DD'. "
                  f"If provided, the script will filter the data in `--excel` based on this date. "
                  f"Multiple dates can be provided as a comma-separated list 'YYYY-MM-DD,YYYY-MM-DD'. "
@@ -85,7 +99,7 @@ def parse_args():
 
     parser.add_argument(
             "--pos",
-            type=str,
+            type=to_tuple_int,
             help=f"View of the experiment, given as an integer. "
                  f"If provided, the script will filter the data in `--excel` based on these positions. "
                  f"Multiple positions can be provided as a comma-separated list '1,2,3'. "
@@ -241,8 +255,8 @@ def main():
         if dates is None or positions is None:
             raise ValueError("Please provide both `--date` and `--pos` arguments when using `--excel`.")
 
-        dates = dates.replace("-", "_").split(",")
-        positions = [int(p) for p in positions.split(",")]
+        for i in range(len(dates)):
+            dates[i] = dates[i].replace("-", "_")
 
         if len(dates) == 1:
             dates = dates * len(positions)  # repeat date for each pos
@@ -296,9 +310,9 @@ def main():
             dm.cpsam_mask()
 
         if not args.no_plot:
-            dm.plot_stats(save_fig=True)
+            dm.plot_stats(show_fig=False, save_fig=True)
             if not args.plot_only_stats:
-                dm.plot_frame(save_fig=True)
+                dm.plot_frame(show_fig=False, save_fig=True)
 
 
 if __name__ == "__main__":

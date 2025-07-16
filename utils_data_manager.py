@@ -1073,10 +1073,13 @@ class DataManager:
             Quantity(label=r"Sum Intensity $\times$ Area",
                     latex=r"$\sum_i {I_t^{(i)} \cdot A_t^{(i)}}$",
                     y=self.stats.sum_area_intensity),
-            Quantity(label=r"Intensity (Excel)",
-                    latex=r"",
-                    y=self.stats.intensity_excel),
         ]
+        if self.stats.intensity_excel is not None:
+            quantities_to_plot += [
+                Quantity(label=r"Intensity (Excel)",
+                        latex=r"",
+                        y=self.stats.intensity_excel)
+            ]
 
         for q in quantities_to_plot:
             q.y = np.asarray(q.y, dtype=float)
