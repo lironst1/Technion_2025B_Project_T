@@ -37,6 +37,14 @@ def parse_args():
     )
 
     parser.add_argument(
+            "-p",
+            "--print",
+            action="store_true",
+            default=False,
+            help="Print image tree and exit.",
+    )
+
+    parser.add_argument(
             "-dl",
             "--directories_list",
             type=str,
@@ -274,6 +282,11 @@ def main():
                 pos=positions,
                 random_forest_pixel_classifier=None,
         )
+
+        if args.print:
+            logger.info(f"Printing image tree for directory '{dir_root}'.")
+            dm.print_image_tree()
+            return
 
         if args.segment_manually:
             dm.segment_in_napari()
