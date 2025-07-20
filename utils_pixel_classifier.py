@@ -54,7 +54,7 @@ class RandomForestPixelClassifier:
 		self.feature_names = []
 
 		for sigma in self.sigmas:
-			# Gaussian smoothed intensity
+			# Gaussian-smoothed intensity
 			gauss = gaussian_filter(image, sigma=sigma)
 			features.append(gauss)
 			self.feature_names.append(f'gaussian_{sigma}')
@@ -91,9 +91,11 @@ class RandomForestPixelClassifier:
 			images = [images]
 			labels = [labels]
 
+		logger.debug(f"Training Pixel Classifier with {len(images)} images and {len(labels)} label masks.")
+
 		X_all, y_all = [], []
 		for image, label in tqdm(zip(images, labels),
-				**get_tqdm_kw(desc="Training PixelClassifier", unit="image", total=len(images))):
+				**get_tqdm_kw(desc="Training Pixel Classifier", unit="image", total=len(images))):
 			features = self._compute_features(image)
 			is_labeled = (label > 0)
 			X = features[is_labeled]

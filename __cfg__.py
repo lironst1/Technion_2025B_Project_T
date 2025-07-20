@@ -51,6 +51,7 @@ DIR_OUTPUT = "output"
 
 class DataType:
     """Container for data type information."""
+
     def __init__(self, dirname, ext):
         self.dirname = dirname  # Directory name relative to the root directory
         self.ext = ext  # File extension
@@ -124,6 +125,7 @@ CPSAM_EVAL_KW = dict_(
 
 class CPSAMEvalOut:
     """Container for Cellpose model output."""
+
     def __init__(self, mask, flow, style):
         self.mask = mask.astype("uint16")
         self.flow = flow
@@ -137,9 +139,10 @@ PATH_ILASTIK_EXE = r"C:\Program Files\ilastik-1.4.1rc2-gpu\ilastik.exe"  # Path 
 # %% Napari
 class SegmentationLabel:
     """Container for labels and their properties."""
+
     def __init__(self, idx_napari, color, alpha=1.0):
         self.idx_napari = idx_napari
-        self.color = color  # Color of the label in RGB format
+        self.color = gr.hex2rgb(color)  # Color of the label in RGB format
         self.alpha = alpha  # Transparency of the label (0.0 - fully transparent, 1.0 - fully opaque)
 
     def __repr__(self):
@@ -147,10 +150,10 @@ class SegmentationLabel:
 
 
 LABELS = dict_(
-        background=SegmentationLabel(idx_napari=1, color=(0.471, 0.145, 0.024), alpha=0.00),
-        nuclei=SegmentationLabel(idx_napari=2, color=(0.357, 0.835, 0.973), alpha=0.90),
-        hydra=SegmentationLabel(idx_napari=3, color=(0.573, 0.537, 0.910), alpha=0.00),
-        dirt=SegmentationLabel(idx_napari=4, color=(0.424, 0.008, 0.757), alpha=0.00),
+        background=SegmentationLabel(idx_napari=1, color=gr.COLORS.LIGHT_BROWN, alpha=0.00),
+        nuclei=SegmentationLabel(idx_napari=2, color=gr.COLORS.BLUE, alpha=0.90),
+        hydra=SegmentationLabel(idx_napari=3, color=gr.COLORS.PURPLE_A, alpha=0.00),
+        dirt=SegmentationLabel(idx_napari=4, color=gr.COLORS.PURPLE, alpha=0.00),
 )
 
 # %% Plots
@@ -179,13 +182,24 @@ CMAP = dict_(
 
 class Stats:
     """Container for nuclei statistics."""
-    def __init__(self, count, avg_intensity, avg_area, sum_area_intensity, avg_dist, intensity_excel):
-        self.count = count
-        self.avg_intensity = avg_intensity
-        self.avg_area = avg_area
-        self.sum_area_intensity = sum_area_intensity
-        self.avg_dist = avg_dist
-        self.intensity_excel = intensity_excel
+
+    def __init__(self, size=None,
+            count=None, avg_intensity=None, avg_area=None,
+            sum_area_intensity=None, avg_dist=None, intensity_excel=None):
+        if size is None:
+            self.count = count  # number of detected nuclei
+            self.avg_intensity = avg_intensity  # average intensity
+            self.avg_area = avg_area  # average nuclei area
+            self.sum_area_intensity = sum_area_intensity  # sum of area * intensity
+            self.avg_dist = avg_dist  # average distance between nuclei
+            self.intensity_excel = intensity_excel  # beta-catenin intensity from Excel
+        else:  # initialize with a specific size
+            self.count = np.zeros(size, dtype="uint16")  # number of detected nuclei
+            self.avg_intensity = np.full(size, np.nan)  # average intensity
+            self.avg_area = np.full(size, np.nan)  # average nuclei area
+            self.sum_area_intensity = np.full(size, np.nan)  # sum of area * intensity
+            self.avg_dist = np.full(size, np.nan)  # average distance between nuclei
+            self.intensity_excel = None  # beta-catenin intensity from Excel
 
 
 # %% TQDM
@@ -206,9 +220,3 @@ logger = Logger(
         min_level_file=Logger.NAME2LEVEL.DEBUG if DEBUG else Logger.NAME2LEVEL.INFO,
         min_level_console=Logger.NAME2LEVEL.DEBUG if DEBUG else Logger.NAME2LEVEL.INFO,
 )
-
-# %% Random seed
-if DEBUG:
-    logger.info(f"Running in DEBUG mode with seed {SEED}.")
-    np.random.seed(SEED)
-    random.seed(SEED)

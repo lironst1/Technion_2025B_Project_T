@@ -6,7 +6,9 @@ import functools
 from multiprocessing import Process
 from collections import defaultdict
 from pathlib import Path
-from collections.abc import Iterable
+from collections.abc import Iterable, Callable
+
+import pandas as pd
 from tqdm import tqdm
 from natsort import natsorted
 import numpy as np
@@ -23,7 +25,7 @@ from liron_utils import graphics as gr
 
 from __cfg__ import logger, AUTO_CONTRAST, set_props_kw_image, LABELS, CMAP, DATA_TYPES, Stats, \
     CPSAM_EVAL_KW, CPSAMEvalOut, get_tqdm_kw, CACHE_SIZE, DIR_OUTPUT, DEBUG
-from utils import imread, imwrite, pickle_load, pickle_dump, ExcelData, get_image_paths
+from utils import imread, imwrite, pickle_load, pickle_dump, ExcelData, get_image_paths, TimeVector
 from utils_pixel_classifier import RandomForestPixelClassifier
 from utils_napari import open_gui_for_segmentation
 import tests
@@ -45,59 +47,53 @@ class DataManager:
         If True, only labeled images will be loaded.
         If False, only unlabeled images will be loaded.
         If None, both labeled and unlabeled images will be loaded.
-    path_excel :            str, optional
+    excel_data :            str, optional
         Path to the Excel experiments file. Make sure to define columns correctly in EXCEL_COLUMNS
     random_forest_pixel_classifier :      PixelClassifier or str, optional
         Path to pixel classifier .pkl file or the object itself.
         If None, a new pixel classifier will be created.
     """
 
-    def __init__(self, dir_root, *,
-            labeled=None, sample_size=None, path_excel=None, date=None, pos=None,
+    def __init__(self, dir_root: str, *,
+            labeled: bool = None,
+            sample_size: float = None,
+            excel_data: str | pd.DataFrame = None, date: str | pd.Timestamp = None, pos: str | int = None,
             random_forest_pixel_classifier=None):
 
         tests.dir_exist(dir_root)
         self.dir_root = dir_root
 
-        self.basenames, self.paths, self.counts = get_image_paths(dir_root=dir_root, labeled=labeled,
-                sample_size=sample_size)
+        if excel_data is not None:
+            excel_data = ExcelData(excel_data=excel_data, date=date, pos=pos)
+
+        self.dir_root, self.basenames, self.paths, self.counts, num_frames_before_filtering = get_image_paths(
+                dir_root=dir_root,
+                labeled=labeled,
+                sample_size=sample_size,
+                excel_data=excel_data, date=date, pos=pos
+        )
         self.num_samples = len(self.basenames)
 
-        # Excel file
-        if path_excel is None:
-            self.time = dict_(
-                    vector=range(self.num_samples),
-                    limits=np.array([0, self.num_samples - 1]),
-                    units="frames",
-            )
+        logger.info(f"Processing {self.num_samples} images in '{self.dir_root}'.\n{self._table_dir_tree}")
+
+        if excel_data is None:
             self._intensity_excel = None
-
+            self.time = TimeVector(num_samples=self.num_samples)
         else:
-            if date is None or pos is None:
-                raise ValueError("If `path_excel` is given, both `date` and `pos` must be specified.")
-
-            excel_data = ExcelData(path_excel, num_samples=self.num_samples, date=date, pos=pos)
-
-            self.basenames = self.basenames[excel_data.min_frame:excel_data.max_frame + 1]
-            self.paths = dict_(**{basename: self.paths[basename] for basename in self.basenames})
-            self.num_samples = len(self.basenames)
-
-            # Get time vector
-            t0 = excel_data.time_after_cut[0]
-            time_interval = excel_data.time_interval[0]
-            self.time = dict_(
-                    vector=(t0 + np.arange(self.num_samples) * time_interval) / 60,
-                    limits=np.array([0, t0 + (self.num_samples - 1) * time_interval]) / 60,
-                    units="hours",
-            )
-
-            # Get beta-catenin intensity
-            lengths = [tf - ti + 1 for ti, tf in
-                zip(excel_data.initial_frame_beta_catenin, excel_data.final_frame_beta_catenin)]
-            self._intensity_excel = np.repeat(excel_data.beta_catenin_intensity, lengths)
-
-            if len(self.time.vector) != len(self._intensity_excel):
-                raise ValueError("Time vector must have same length as `intensity_excel`.")
+            self._intensity_excel = excel_data.beta_catenin_intensity_full
+            self.time = excel_data.get_time_vector(frame_init=0, frame_final=num_frames_before_filtering - 1)
+            if len(self.time) == self.num_samples:
+                pass
+            elif len(self.time) == self.num_samples + 1:  # fix human errors in Excel file
+                logger.warning(
+                        f"Excel data has {len(self.time)} frames, but the number of samples is {self.num_samples}. "
+                        f"Changing it to {self.num_samples}.")
+                self.time.vector = self.time.vector[:-1]  # remove the last frame
+                self._intensity_excel = self._intensity_excel[:-1]  # remove the last frame
+            else:
+                raise ValueError(
+                        f"Excel data has {len(self.time)} frames, but the number of samples is {self.num_samples}. "
+                        f"Make sure the Excel file is correct and has the same number of frames as the images.")
 
         # Cache basename -> data
         self.cache = NamedQueue(max_size=CACHE_SIZE)
@@ -139,7 +135,7 @@ class DataManager:
         if basename in self.cache:  # Check if the image is already in memory
             data = self.cache[basename]
 
-            logger.debug(f"Image {idx}:{basename} loaded from cache. Cache size: {len(self.cache)}.")
+            logger.debug(f"Image {idx}:{basename} loaded from cache.")
 
         else:  # Load the image and associated data
             data = dict_(basename=basename)
@@ -150,11 +146,11 @@ class DataManager:
             # Add to cache
             self.cache.enqueue(name=basename, item=data)
 
-            logger.debug(f"Image {idx}:{basename} loaded to cache. Cache size: {len(self.cache)}.")
+            logger.debug(f"Image {idx}:{basename} loaded to cache.")
 
         return data
 
-    @functools.cached_property
+    @property
     def _table_dir_tree(self):
         dirnames = natsorted(np.unique([os.path.dirname(basename) for basename in self.basenames]))
 
@@ -218,7 +214,7 @@ class DataManager:
     def print_image_tree(self):
         """Recursively print image tree statistics with counts of images and associated data."""
 
-        print(self._table_dir_tree)  # todo: fix total in case of excel data
+        print(self._table_dir_tree)
 
     @staticmethod
     def _iterable_idx(tqdm_kw=None, use_threading=False, batch_size=1, shuffle=False):
@@ -248,7 +244,7 @@ class DataManager:
         if use_threading and batch_size > 1:
             raise ValueError("Threading cannot be used with `batch_size`>1.")
 
-        def decorator(func):
+        def decorator(func: Callable):
 
             @functools.wraps(func)
             def wrapper(self, idx=None, *args, **kwargs):
@@ -358,7 +354,7 @@ class DataManager:
             if self.paths[basename].cpsam_out is None:
                 return None
             cpsam_out = pickle_load(os.path.join(self.dir_root, self.paths[basename].cpsam_out))
-            return cpsam_out
+            return CPSAMEvalOut(**vars(cpsam_out))  # In case the CPSAMEvalOut class has been modified
 
         elif data_type == "figs":
             return None
@@ -463,7 +459,6 @@ class DataManager:
             logger.info(f"Creating new pixel classifier.")
 
         self.pixel_classifier.fit(images=images, labels=labels)
-        return None
 
     def pixel_classifier_save(self, filename=None):
         """Save the pixel classifier to a file."""
@@ -549,7 +544,8 @@ class DataManager:
 
         return cpsam_model
 
-    @_iterable_idx(tqdm_kw=dict(desc="Predicting model masks", unit="image"), batch_size=CPSAM_EVAL_KW.batch_size)
+    @_iterable_idx(tqdm_kw=dict(desc="Predicting Cellpose model masks", unit="image"),
+            batch_size=CPSAM_EVAL_KW.batch_size)
     def cpsam_mask(self, idx=None, plot=False, **plot_frame_kw):
         basenames = self.get_data(idx=idx, data_type="basename")
         images = self.get_data(idx=idx, data_type="image")
@@ -561,12 +557,10 @@ class DataManager:
         cpsam_outs = self.get_data(idx=idx, data_type="cpsam_out")
         idx_none = [i for i, cpsam_out in enumerate(cpsam_outs) if cpsam_out is None]
         if len(idx_none) == 0:
-            logger.debug(f"Images {idx} already have masks. Skipping.")
-
             if plot:
                 self.plot_frame(idx, **plot_frame_kw)
 
-            return cpsam_outs
+            return None
 
         basenames = [basenames[i] for i in idx_none]
         images = [images[i] for i in idx_none]
@@ -601,7 +595,7 @@ class DataManager:
             if plot:
                 self.plot_frame(basename, **plot_frame_kw)
 
-        return cpsam_outs
+        return None
 
     # Plot
     @_iterable_idx(tqdm_kw=dict(desc="Plotting images", unit="image"))
@@ -696,7 +690,6 @@ class DataManager:
 
             # Check if the file already exists
             if os.path.exists(save_file_name):
-                logger.debug(f"Image {basename} already exists. Skipping.")
                 return None
         else:
             save_file_name = False
@@ -937,28 +930,21 @@ class DataManager:
         if os.path.exists(filename):
             logger.info(f"Loading statistics from {filename}...")
             stats = pickle_load(filename)
-            logger.info("Statistics loaded.")
             try:
-                stats = Stats(**vars(stats))
-                return Stats(**vars(stats))
+                stats = Stats(**vars(stats))  # In case the Stats class has been modified
+                logger.info("Statistics loaded.")
+                return stats
             except TypeError as e:
-                logger.error(f"Error loading statistics: {e}. Recalculating statistics.")
+                logger.warning(f"Error loading statistics: {e}. Recalculating statistics.")
 
         # if not all(self.has_data(data_type="mask")):
         # 	raise ValueError("Not all images have masks. Run `cpsam_mask()` on all images first.")
         idx_cpsam_out = np.argwhere(self.has_data(data_type="cpsam_out")).flatten()
 
         # Calculate statistics
-        stats = Stats(
-                count=np.zeros(len(self), dtype="uint16"),  # number of detected nuclei
-                avg_intensity=np.full(len(self), np.nan),  # average intensity
-                avg_area=np.full(len(self), np.nan),  # average nuclei area
-                sum_area_intensity=np.full(len(self), np.nan),  # sum of area * intensity
-                avg_dist=np.full(len(self), np.nan),  # average distance between nuclei
-                intensity_excel=self._intensity_excel,  # beta-catenin intensity from Excel
-        )
-
         logger.info("Calculating statistics...")
+        stats = Stats(size=len(self))
+        stats.intensity_excel = self._intensity_excel
 
         for idx in tqdm(idx_cpsam_out, **get_tqdm_kw(desc="Calculating statistics", unit="image")):
             image = self.get_data(idx=idx, data_type="image")
@@ -967,9 +953,9 @@ class DataManager:
 
             # Get statistics
             with warnings.catch_warnings():
-                warnings.filterwarnings("ignore", message="Mean of empty slice", category=RuntimeWarning)
-                warnings.filterwarnings("ignore", message="invalid value encountered in double_scalars",
-                        category=RuntimeWarning)
+                # warnings.filterwarnings("ignore", message="Mean of empty slice", category=RuntimeWarning)
+                # warnings.filterwarnings("ignore", message="invalid value encountered in double_scalars",
+                #         category=RuntimeWarning)
 
                 # Region properties
                 props = regionprops(label_image=mask, intensity_image=image)
@@ -989,10 +975,11 @@ class DataManager:
                     total_area = np.sum([p.area for p in props])
                     stats.avg_intensity[idx] = stats.sum_area_intensity[idx] / total_area
 
-                    # Avg. distance between nuclei
-                    centroids = [p.centroid for p in props]
-                    dist_mat = np.triu(distance_matrix(x=centroids, y=centroids), k=1)
-                    stats.avg_dist[idx] = np.mean(dist_mat[dist_mat > 0])
+                    if count > 1:
+                        # Avg. distance between nuclei
+                        centroids = [p.centroid for p in props]
+                        dist_mat = np.triu(distance_matrix(x=centroids, y=centroids), k=1)
+                        stats.avg_dist[idx] = np.mean(dist_mat[dist_mat > 0])
 
         logger.info("Finished calculating statistics.")
 
@@ -1024,11 +1011,11 @@ class DataManager:
 
         # Check and parse inputs
         if save_fig:
-            save_file_name = os.path.join(self.dir_root, DATA_TYPES.figs.dirname, "stats" + DATA_TYPES.figs.ext)
+            save_file_name = os.path.join(DATA_TYPES.figs.dirname, "stats" + DATA_TYPES.figs.ext)
 
             # Check if the file already exists
-            if os.path.exists(save_file_name):
-                logger.debug(f"Statistics figure already exists. Skipping.")
+            if os.path.exists(os.path.join(self.dir_root, save_file_name)):
+                logger.info(f"Statistics figure already exists in {save_file_name}. Skipping.")
                 return None
         else:
             save_file_name = False
@@ -1130,10 +1117,15 @@ class DataManager:
             set_props_kw = dict(
                     sup_title=f"Statistics",
                     show_fig=not save_fig,
-                    save_file_name=save_file_name,
+                    save_file_name=os.path.join(self.dir_root, save_file_name),
                     close_fig=save_fig,
             ) | set_props_kw
             Ax.set_props(**set_props_kw)
+
+            if save_file_name:
+                logger.info(f"Statistics figure saved to {save_file_name}.")
+
+        return None
 
     def segment_in_napari(self, idx=None):
         basenames = self.get_data(idx=idx, data_type="basename")

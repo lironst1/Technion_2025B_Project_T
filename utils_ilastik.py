@@ -66,23 +66,6 @@ def run_ilastik(path_project, dir_root, image_ext=".tif"):
 		pass
 
 
-# 	with h5py.File(output_file, "r") as f:
-# 		dataset_keys = list(f.keys())
-# 		data = f[dataset_keys[0]][:]
-#
-# # Save output
-# base_filename = os.path.splitext(os.path.basename(input_path))[0]
-# if save_dir is not None:
-# 	os.makedirs(save_dir, exist_ok=True)
-# 	save_path = os.path.join(save_dir, f"{base_filename}.{save_format}")
-# 	if save_format == "npy":
-# 		np.save(save_path, data)
-# 	elif save_format == "tif":
-# 		tifffile.imwrite(save_path, data.astype(np.float32))  # or np.uint8 if needed
-# 	else:
-# 		raise ValueError(f"Unknown save_format: {save_format}")
-
-
 def run_ilastik_parallel(
 		path_project,
 		filenames,

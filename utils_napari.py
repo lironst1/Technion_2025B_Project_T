@@ -6,7 +6,7 @@ from tqdm import tqdm
 
 from liron_utils.pure_python import print_in_color
 
-from __cfg__ import logger, DATA_TYPES, LABELS
+from __cfg__ import logger, DATA_TYPES, LABELS, CMAP
 from utils import is_image, imwrite
 
 
@@ -78,6 +78,7 @@ def open_gui_for_segmentation(dir_root, basenames, images, labels, masks):
 
     """
     import napari
+    from napari.utils.notifications import notification_manager
     from qtpy.QtWidgets import QPushButton, QVBoxLayout, QWidget, QMessageBox, QShortcut
     from qtpy.QtGui import QKeySequence
 
@@ -101,30 +102,68 @@ def open_gui_for_segmentation(dir_root, basenames, images, labels, masks):
     viewer = napari.Viewer(title=f"Nuclei Segmentation - {os.path.basename(dir_root)}")
 
     # %% Add image layer
-    images_layer = viewer.add_image(images, name="Images")
+    layer_images = viewer.add_image(images, name="Images")
+    layer_images.editable = False
 
     # %% Add labels layer
-    labels_layer = viewer.add_labels(np.copy(labels), name="Labels")
-    labels_layer.brush_size = 10
-    labels_layer.mode = "paint"
+    colormap = napari.utils.CyclicLabelColormap(np.vstack([[0, 0, 0], CMAP.rgb.colors]))
+    layer_labels = viewer.add_labels(np.copy(labels), name="Labels", colormap=colormap)
+    layer_labels.editable = True
+    layer_labels.brush_size = 10
+    layer_labels.mode = "paint"
+    layer_labels.selected_label = LABELS.nuclei.idx_napari  # Set default label to nuclei
+
+    def cyclic_label(event):
+        """ Cycle through the labels."""
+        idx_napari = [label.idx_napari for label in LABELS.values()]
+        idx_current = layer_labels.selected_label
+        if idx_current not in idx_napari:  # Wrap around to the first label
+            logger.debug(f"Selected label index {idx_current} not in LABELS. Wrapping to first/last label.")
+            layer_labels.selected_label = idx_napari[idx_current % len(idx_napari) - 1]
+
+    layer_labels.events.selected_label.connect(cyclic_label)
+
+    # %% Add masks layer
+    layer_masks = viewer.add_labels(np.copy(masks), name="Cellpose Masks", colormap=colormap)
+    layer_masks.editable = False
+
+    # %% Filename layer (show filename both in the status bar and as an overlay on the image)
+    viewer.status = f"Filename: {basenames[viewer.dims.current_step[0]]}"  # Initialize status bar
+
+    layer_text = viewer.add_points(
+            data=[[5, 5]],
+            name="Filename Overlay",
+            size=0,  # invisible dot
+            opacity=0.8,
+            properties=dict(basename=[basenames[viewer.dims.current_step[0]]]),
+            text=dict(
+                    string="{basename}",
+                    size=14,
+                    color="white",
+                    anchor="upper_left",
+                    translation=[5, 5],
+            ))
+    layer_text.editable = False
+
+    def update_filename(event):
+        idx = int(event.value[0])
+        layer_text.properties = dict(basename=[basenames[idx]])  # Update text overlay with current filename
+        viewer.status = f"Filename: {basenames[idx]}"  # Update status bar with current filename
+
+    viewer.dims.events.current_step.connect(update_filename)
+
+    # %% Create custom widget for saving
+    save_box_widget = QWidget()
+    save_box_layout = QVBoxLayout()
+
+    # Save button
+    button_save = QPushButton("Save Labels")
+    button_save.setStyleSheet("QPushButton { background-color: #4CAF50; color: white; font-weight: bold; }")
 
     def get_label_filename(basename):
         dirname, filename = os.path.split(basename)
         save_file_name = os.path.join(dirname, DATA_TYPES.labels.dirname, filename + DATA_TYPES.labels.ext)
         return os.path.join(dir_root, save_file_name)
-
-    # %% Add masks layer
-    masks_layer = viewer.add_labels(np.copy(masks), name="Cellpose Masks")
-    masks_layer.brush_size = 10
-    masks_layer.mode = "paint"
-
-    # %% Create custom widget for saving
-    widget = QWidget()
-    layout = QVBoxLayout()
-
-    # Save button
-    save_button = QPushButton("Save Labels")
-    save_button.setStyleSheet("QPushButton { background-color: #4CAF50; color: white; font-weight: bold; }")
 
     def is_saved(idx=None):
         """
@@ -145,7 +184,7 @@ def open_gui_for_segmentation(dir_root, basenames, images, labels, masks):
         elif isinstance(idx, int):
             idx = [idx]
 
-        current_labels = labels_layer.data
+        current_labels = layer_labels.data
 
         for i in idx:
             label = labels[i]
@@ -159,7 +198,7 @@ def open_gui_for_segmentation(dir_root, basenames, images, labels, masks):
     def save_button_callback():
         logger.debug("Save Labels button pressed.")
         try:
-            current_labels = labels_layer.data
+            current_labels = layer_labels.data
 
             for i, (basename, current_label) in enumerate(zip(basenames, current_labels)):
                 if is_saved(idx=i):
@@ -189,16 +228,16 @@ def open_gui_for_segmentation(dir_root, basenames, images, labels, masks):
             msg.exec_()
             logger.error(f"Error saving labels: {e}")
 
-    save_button.clicked.connect(save_button_callback)  # Connect button
-    layout.addWidget(save_button)  # Add button to layout
+    button_save.clicked.connect(save_button_callback)  # Connect button
+    save_box_layout.addWidget(button_save)  # Add button to layout
 
     # Save shortcut (Ctrl+S)
     shortcut = QShortcut(QKeySequence("Ctrl+S"), viewer.window._qt_window)
     shortcut.activated.connect(save_button_callback)
 
     # Done button
-    done_button = QPushButton("Done")
-    done_button.setStyleSheet("QPushButton { background-color: #2196F3; color: white; font-weight: bold; }")
+    button_done = QPushButton("Done")
+    button_done.setStyleSheet("QPushButton { background-color: #2196F3; color: white; font-weight: bold; }")
 
     def done_buttun_callback(event=None):
         logger.debug(f"Done button pressed.")
@@ -220,7 +259,7 @@ def open_gui_for_segmentation(dir_root, basenames, images, labels, masks):
             return
 
         else:  # Ask if user wants to save before closing
-            reply = QMessageBox.question(widget,
+            reply = QMessageBox.question(save_box_widget,
                     'Unsaved Changes',
                     'You have unsaved changes. Do you want to save before closing?',
                     QMessageBox.Yes | QMessageBox.No | QMessageBox.Cancel)
@@ -236,50 +275,24 @@ def open_gui_for_segmentation(dir_root, basenames, images, labels, masks):
 
         close_window(False)
 
-    done_button.clicked.connect(done_buttun_callback)  # Connect button
-    layout.addWidget(done_button)  # Add button to layout
+    button_done.clicked.connect(done_buttun_callback)  # Connect button
+    save_box_layout.addWidget(button_done)  # Add button to layout
 
-    widget.setLayout(layout)
-    viewer.window.add_dock_widget(widget, area='right', name='Labeling Controls')  # Add widget to napari
+    save_box_widget.setLayout(save_box_layout)
+    viewer.window.add_dock_widget(save_box_widget, area='right', name='Labeling Controls')  # Add widget to napari
 
     # %% Show the embedded IPython console
     console = viewer.window._qt_viewer.console  # napari-console plugin
     viewer.window.add_dock_widget(console, area='bottom', name='Console')
-    console.push(dict(viewer=viewer, instructions=instructions, is_saved=is_saved, labels_layer=labels_layer))
+    variables_to_send = dict(viewer=viewer, instructions=instructions)
+    print(f"The following variables are available in the napari console: {', '.join(variables_to_send.keys())}.")
+    console.push(variables_to_send)  # Add variables to console
 
     # %% Override close event to handle unsaved changes
     viewer.window._qt_window.closeEvent = done_buttun_callback
 
-    # %% Show filename when switching images
-    # Update status bar
-    def update_filename_text(event):
-        idx = int(event.value[0])
-        viewer.status = f"Filename: {basenames[idx]}"
+    # %% Set the active layer to labels
+    viewer.layers.selection.active = layer_labels
 
-    viewer.dims.events.current_step.connect(update_filename_text)
-    viewer.status = f"Filename: {basenames[viewer.dims.current_step[0]]}"  # Initialize the status bar with the first filename
-
-    # Text Overlay
-    points_layer = viewer.add_points(
-            data=[[5, 5]],
-            name="Filename Overlay",
-            size=0,  # practically invisible dot
-            opacity=0.8,  # fully transparent
-            properties=dict(basename=[basenames[viewer.dims.current_step[0]]]),
-            text=dict(
-                    string="{basename}",
-                    size=16,
-                    color="white",
-                    anchor="upper_left",
-                    translation=[10, 10],
-            )
-    )
-
-    def update_text_overlay(event):
-        idx = int(event.value[0])
-        points_layer.properties = dict(basename=[basenames[idx]])
-
-    viewer.dims.events.current_step.connect(update_text_overlay)
-
-    # %% Show the viewer and wait for the user to finish
-    napari.run()  # viewer.show(block=True)
+    # %% Show the viewer
+    napari.run(gui_exceptions=True)  # viewer.show(block=True)

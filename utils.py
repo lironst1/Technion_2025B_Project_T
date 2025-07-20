@@ -8,13 +8,13 @@ import numpy as np
 import pandas as pd
 import cv2
 import tifffile
-from typing import Optional, Union
 
 from liron_utils.files import copy
 from liron_utils.files import open_file, mkdirs
 from liron_utils.pure_python import dict_
 
-from __cfg__ import logger, DEBUG, DIR_OUTPUT, IMAGE_EXTENSIONS, DATA_TYPES, get_tqdm_kw, EXCEL_COLUMNS, AUTO_CONTRAST_KW, IGNORED_DIRS
+from __cfg__ import logger, DEBUG, DIR_OUTPUT, IMAGE_EXTENSIONS, DATA_TYPES, get_tqdm_kw, EXCEL_COLUMNS, \
+    AUTO_CONTRAST_KW, IGNORED_DIRS
 import tests
 
 
@@ -28,8 +28,8 @@ def is_image(filename):
 
 
 def read_excel(path_excel):
-    tests.excel_permissions(path_excel)
-    excel_data = pd.read_excel(path_excel)
+    # tests.excel_permissions(path_excel)
+    excel_data = pd.read_excel(path_excel, engine="openpyxl")
     return excel_data
 
 
@@ -37,64 +37,136 @@ def ignore_nan(x):
     return x[~np.isnan(x)]
 
 
+class TimeVector:
+    def __init__(self, num_samples: int, t0: float = 0, time_interval: float = 1,
+            limits: list = None, units: str = "frames"):
+        """
+        Initialize a time vector.
+
+        Parameters
+        ----------
+        num_samples : int
+            Number of samples in the time vector.
+        t0 : float, optional
+            Initial time (default is 0).
+        time_interval : float, optional
+            Time interval between samples (default is 1).
+        """
+
+        self.t0 = t0
+        self.time_interval = time_interval
+        self.units = units
+
+        if limits is None:
+            self.limits = np.array([t0, t0 + (num_samples - 1) * time_interval])
+        else:
+            self.limits = np.array(limits)
+            if len(self.limits) != 2:
+                raise ValueError("Limits must be a list or array of two elements: [min, max].")
+            if self.limits[0] > self.limits[1]:
+                raise ValueError("Minimum limit must be less than or equal to maximum limit.")
+
+        self.vector = np.arange(num_samples) * self.time_interval + self.t0
+
+    def __repr__(self):
+        return (f"TimeVector(num_samples={len(self.vector)}, "
+                f"t0={self.vector[0]}, "
+                f"time_interval={self.vector[1] - self.vector[0]:.3f}, "
+                f"limits={self.limits[0]:.3f}-{self.limits[1]:.3f}, "
+                f"units='{self.units}')")
+
+    def __len__(self):
+        return len(self.vector)
+
+
 class ExcelData:
     """Container for Excel data."""
 
-    def __init__(self, path_excel, num_samples, date=None, pos=None):
-        excel_data = read_excel(path_excel)
+    def __init__(self, excel_data: str | pd.DataFrame, date: str | pd.Timestamp, pos: str | int):
+        if isinstance(excel_data, pd.DataFrame):
+            data = excel_data
+        elif isinstance(excel_data, str):
+            logger.debug(f"Loading Excel data from file '{excel_data}'...")
+            data = read_excel(excel_data)
+        else:
+            raise ValueError(f"Invalid type for `excel_data`: {type(excel_data)}. "
+                             f"Expected str (file path) or pd.DataFrame.")
 
-        excel_data[EXCEL_COLUMNS.date] = pd.to_datetime(excel_data[EXCEL_COLUMNS.date], format="%d.%m.%y").ffill()
-        excel_data[EXCEL_COLUMNS.pos] = excel_data[EXCEL_COLUMNS.pos].ffill()
+        data[EXCEL_COLUMNS.date] = pd.to_datetime(data[EXCEL_COLUMNS.date], format="%d.%m.%y").ffill()
+        data[EXCEL_COLUMNS.pos] = data[EXCEL_COLUMNS.pos].ffill()
 
-        # Filter frames by final frame of beta-catenin
         if isinstance(date, str):
             date = pd.to_datetime(date, format="%Y_%m_%d")
         if isinstance(pos, str):
             pos = int(pos.lower().replace("view", "").replace("pos", ""))
 
-        excel_data = excel_data[(excel_data[EXCEL_COLUMNS.date] == date) & (excel_data[EXCEL_COLUMNS.pos] == pos)]
-        if excel_data.empty:
-            logger.warning(f"No matching rows found in Excel file for "
-                           f"date {date.strftime('%Y_%m_%d')} and pos {pos}.")
+        data = data[(data[EXCEL_COLUMNS.date] == date) & (data[EXCEL_COLUMNS.pos] == pos)]
+        if data.empty:
+            raise ValueError(f"No matching rows found in Excel file for "
+                             f"date {date.strftime('%Y_%m_%d')} and pos {pos}.")
 
-        excel_data = dict_(**{k: excel_data[v].to_numpy() for k, v in EXCEL_COLUMNS.items()})
+        subset_dict = dict_(**{k: data[v].to_numpy() for k, v in EXCEL_COLUMNS.items()})
 
-        self.date = excel_data.date
-        self.pos = excel_data.pos.astype(int)
-        self.time_after_cut = excel_data.time_after_cut
-        self.time_interval = excel_data.time_interval
-        self.main_orientation = excel_data.main_orientation.astype(int)
-        self.initial_frame_beta_catenin = ignore_nan(excel_data.initial_frame_beta_catenin).astype(int)
-        self.final_frame_beta_catenin = ignore_nan(excel_data.final_frame_beta_catenin).astype(int)
-        self.beta_catenin_intensity = ignore_nan(excel_data.beta_catenin_intensity).astype(int)
+        self.date = subset_dict.date
+        self.pos = subset_dict.pos.astype(int)
+        self.time_after_cut = subset_dict.time_after_cut
+        self.time_interval = subset_dict.time_interval
+        self.main_orientation = subset_dict.main_orientation.astype(int)
 
-        self.min_frame = int(self.initial_frame_beta_catenin[0])
-        self.max_frame = int(self.final_frame_beta_catenin[-1])
+        self.initial_frame_beta_catenin = ignore_nan(subset_dict.initial_frame_beta_catenin).astype(int)
+        self.final_frame_beta_catenin = ignore_nan(subset_dict.final_frame_beta_catenin).astype(int)
 
-        # fix human errors in Excel file
-        if self.max_frame == num_samples:
-            logger.warning(f"Excel data has max_frame={self.max_frame}, which is equal to the number of samples "
-                           f"({num_samples}). Changing it to {self.max_frame - 1}.")
-            self.final_frame_beta_catenin[-1] = self.max_frame = num_samples - 1
-
-        final_frame_beta_catenin = np.hstack([self.initial_frame_beta_catenin[1:] - 1, self.max_frame])
-        if not np.all(final_frame_beta_catenin == self.final_frame_beta_catenin):
-            idx = np.where(final_frame_beta_catenin != self.final_frame_beta_catenin)[0][0]
+        final_frame_beta_catenin = np.hstack(
+                [self.initial_frame_beta_catenin[1:] - 1, self.max_frame])
+        if not np.all(self.final_frame_beta_catenin == final_frame_beta_catenin):
+            idx = np.where(self.final_frame_beta_catenin != final_frame_beta_catenin)[0][0]
             logger.warning(f"Excel data has inconsistent initial and final frames. Final frame at index {idx} "
                            f"is {self.final_frame_beta_catenin[idx]}, but next initial frame "
                            f"is {self.initial_frame_beta_catenin[1:][idx]}. Defining `final_frame=initial_frame[1:]-1`.")
             self.final_frame_beta_catenin = final_frame_beta_catenin
 
-        self.check_inputs()
+        self.beta_catenin_intensity = ignore_nan(subset_dict.beta_catenin_intensity).astype(int)
 
-    def check_inputs(self):
-        if not all([
-            len(self.initial_frame_beta_catenin) == len(self.final_frame_beta_catenin),
-            len(self.initial_frame_beta_catenin) == len(self.beta_catenin_intensity),
-            len(self.final_frame_beta_catenin) == len(self.beta_catenin_intensity),
-        ]):
+        if not len(self.initial_frame_beta_catenin) == len(self.final_frame_beta_catenin) == \
+               len(self.beta_catenin_intensity):
             raise ValueError("Excel data columns 'initial_frame_beta_catenin', 'final_frame_beta_catenin', and "
                              "'beta_catenin_intensity' must have the same length.")
+
+        if len(self.get_time_vector().vector) != len(self.beta_catenin_intensity_full):
+            raise ValueError("Time vector must have same length as `intensity_excel`.")
+
+    @property
+    def min_frame(self):
+        """Minimum frame number."""
+        return self.initial_frame_beta_catenin[0]
+
+    @property
+    def max_frame(self):
+        """Maximum frame number."""
+        return self.final_frame_beta_catenin[-1]
+
+    @property
+    def num_samples(self):
+        return self.final_frame_beta_catenin[-1] - self.initial_frame_beta_catenin[0] + 1
+
+    def get_time_vector(self, frame_init: int = None, frame_final: int = None):
+        if frame_init is None:
+            frame_init = self.initial_frame_beta_catenin[0]
+        if frame_final is None:
+            frame_final = self.final_frame_beta_catenin[-1]
+        time = TimeVector(
+                num_samples=self.num_samples,
+                t0=self.time_after_cut[0] / 60,  # [hours]
+                time_interval=self.time_interval[0] / 60,  # [hours]
+                limits=[frame_init * self.time_interval[0] / 60, frame_final * self.time_interval[0] / 60],  # [hours]
+                units="hours",
+        )
+        return time
+
+    @property
+    def beta_catenin_intensity_full(self):
+        repeats = [tf - ti + 1 for ti, tf in zip(self.initial_frame_beta_catenin, self.final_frame_beta_catenin)]
+        return np.repeat(self.beta_catenin_intensity, repeats=repeats)
 
 
 def flatten_image_tree(dir_root, dir_target=None, path_excel=None, date=None, pos=None, sep="__", overwrite=False,
@@ -275,46 +347,68 @@ def pickle_dump(obj, filename):
         pickle.dump(obj, f)
 
 
-def get_all_relative_files(root_dir: str, ignore_dirs: bool = False) -> set[str]:
-    """Recursively collects all file paths relative to root_dir."""
-    all_files = set()
-    for current_root, dirs, files in os.walk(root_dir):
-        if ignore_dirs:
-            dirs[:] = [d for d in dirs if d not in IGNORED_DIRS]
-        rel_root = os.path.relpath(current_root, root_dir)
-        if rel_root == ".":
-            rel_root = ""
-        for filename in files:
-            all_files.add(os.path.join(rel_root, filename))
-    return all_files
-
-
-def get_image_paths(
-        dir_root: str,
-        labeled: Optional[bool] = None,
-        sample_size: Optional[Union[int, float, bool]] = None,
-):
-    image_dirname = DATA_TYPES.image.dirname
-    label_dirname = DATA_TYPES.labels.dirname
-    label_ext = DATA_TYPES.labels.ext
+def get_image_paths(dir_root: str,
+        labeled: bool = None,
+        sample_size: float = None,
+        excel_data: pd.DataFrame = None, date: str | pd.Timestamp = None, pos: str | int = None):
+    if isinstance(date, str):
+        date = pd.to_datetime(date, format="%Y_%m_%d")  # todo: add format to __cfg__.py
+    if isinstance(pos, str):
+        pos = int(pos.lower().replace("view", "").replace("pos", ""))
 
     # Collect all files once
-    all_files = get_all_relative_files(dir_root, ignore_dirs=True)
+    def get_all_relative_files(dir_root: str, ignore_dirs: bool = False, date: pd.Timestamp = None, pos: int = None):
+        """Recursively collects all file paths relative to root_dir."""
+
+        if date is not None:
+            date = date.strftime('%Y_%m_%d')
+            pos = f"View{pos}"
+
+        num_frames_before_filtering = None
+        all_files = set()
+        for current_root, dirs, files in os.walk(dir_root):
+            if ignore_dirs:
+                dirs[:] = [d for d in dirs if d not in IGNORED_DIRS]
+            rel_root = os.path.relpath(current_root, dir_root)
+            if rel_root == ".":
+                rel_root = ""
+
+            if date is not None:
+                if date in dirs:
+                    dirs[:] = [d for d in dirs if d == date]
+                    dir_root = os.path.join(dir_root, rel_root, date)
+            if pos is not None:
+                if pos in dirs:
+                    dirs[:] = [d for d in dirs if d == pos]
+                    dir_root = os.path.join(dir_root, rel_root, pos)
+                if not (date in current_root and pos in current_root):
+                    continue
+
+            files = natsorted(files)
+            if excel_data is not None:
+                num_frames_before_filtering = len(files)
+                files = files[excel_data.min_frame:excel_data.max_frame + 1]
+
+            for filename in files:
+                all_files.add(os.path.join(rel_root, filename))
+        return all_files, dir_root, num_frames_before_filtering
 
     # Collect image files
+    all_files, dir_root, num_frames_before_filtering = get_all_relative_files(dir_root=dir_root, ignore_dirs=True,
+            date=date, pos=pos)
     image_paths = []
     for rel_path in all_files:
         parts = rel_path.split(os.sep)
         if is_image(parts[-1]):
             image_paths.append(os.path.join(parts[-3], parts[-2], parts[-1]) if len(parts) > 2 else rel_path)
 
-    all_files = get_all_relative_files(dir_root, ignore_dirs=False)
-
     # Filter by labeled/unlabeled status
+    all_files = get_all_relative_files(dir_root=dir_root, ignore_dirs=False, date=date, pos=pos)[0]
     if labeled is not None:
         filtered = []
         for img_path in image_paths:
-            label_path = os.path.splitext(img_path)[0].replace(image_dirname, label_dirname) + label_ext
+            label_path = os.path.splitext(img_path)[0].replace(DATA_TYPES.image.dirname,
+                    DATA_TYPES.labels.dirname) + DATA_TYPES.labels.ext
             has_label = label_path in all_files
             if (labeled and has_label) or (not labeled and not has_label):
                 filtered.append(img_path)
@@ -350,4 +444,4 @@ def get_image_paths(
                 paths[basename][data_type] = rel_path
                 counts[dirname][data_type] += 1
 
-    return basenames, paths, counts
+    return dir_root, basenames, paths, counts, num_frames_before_filtering

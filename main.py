@@ -2,11 +2,13 @@ import os
 import argparse
 import numpy as np
 import random
+import pandas as pd
 
 from liron_utils.pure_python import Logger
 
 import __cfg__
 from __cfg__ import logger
+from utils import read_excel
 
 
 def to_tuple(strings: str, dtype: type):
@@ -68,22 +70,11 @@ def parse_args():
     )
 
     parser.add_argument(
-            "-o",
-            "--output",
-            type=str,
-            default=__cfg__.DIR_OUTPUT,
-            help="Path to the output directory where results will be saved. "
-                 "If not specified, outputs will be saved in a subdirectory named 'output' in the current directory. "
-                 "If output directory already exists, the script will read existing values from it for processing (if they exist). "
-                 "If directories_list is provided, this output directory will be the base directory for each subdirectory in the list.",
-    )  # TODO: treat directories_list
-
-    parser.add_argument(
             "-e",
             "--excel",
             type=str,
             help=f"Path to an Excel file with experiment data. "
-                 f"If provided, the script will read the following columns: {__cfg__.EXCEL_COLUMNS.values()}. "
+                 f"If provided, the script will read the following columns: {__cfg__.EXCEL_COLUMNS.keys()}. "
                  f"If `--date` and `--pos` are provided, the script will only process data in `--dir` based on these "
                  f"values. Otherwise, it will process all data in `--dir` (which should also appear in `--excel`).",
     )
@@ -135,7 +126,7 @@ def parse_args():
             "--no_cpsam_mask",
             action="store_true",
             default=False,
-            help="Don't run Cellpose model (CPSAM) for segmentation. "
+            help="Do not run Cellpose model (CPSAM) for segmentation. "
                  "By default, the script will run CPSAM for segmentation. "
                  "If set, the script will skip CPSAM segmentation and use existing masks (if available).",
     )
@@ -144,7 +135,7 @@ def parse_args():
             "--no_plot",
             action="store_true",
             default=False,
-            help="Don't plot and don't save figures. "
+            help="Do not plot and do not save figures. "
                  "By default, the script will generate plots and save them in the output directory."
                  "If set, no plots will be generated.",
     )
@@ -214,19 +205,16 @@ def main():
         np.random.seed(__cfg__.SEED)
         random.seed(__cfg__.SEED)
 
-    # %% Output directory
-    if args.output != __cfg__.DIR_OUTPUT:
-        logger.info(f"Output will be saved in '{__cfg__.DIR_OUTPUT}'.")
-        __cfg__.DIR_OUTPUT = args.output  # todo: set as absolute path to save all experiments <output>/<date>/<pos> instead of <date>/<pos>/<output>. Create get_out_dir() function
-
     # %% dir
+
     dir_roots = [args.dir]
-    if args.dir is not None:
+    if args.dir is not None:  # single directory
         if args.directories_list is not None:
             raise ValueError("Cannot specify both `--dir` and `--directories_list`. "
                              "Please provide only one of these arguments.")
-        logger.info(f"Reading directory '{dir_roots[0]}'.")
-    else:
+        logger.info(f"Processing directory '{args.dir}'.")
+
+    else:  # directory list
         if args.directories_list is None:
             raise ValueError("Please provide either `--dir` or `--directories_list`.")
 
@@ -236,27 +224,24 @@ def main():
 
     # %% excel
     path_excel = args.excel
-    dates = args.date
-    positions = args.pos
-    # TODO:
-    #   - excel path, date, pos (accept multiple values for date and pos)
-    #       -d original --excel_path /path/to/excel.xlsx --date 2025-01-01 --pos 1,2
-    #       -d original --excel_path /path/to/excel.xlsx --date 2025-01-01,2025-11-11 --pos 1,2
+    dates = list(args.date)
+    positions = list(args.pos)
 
     if path_excel is None:
         if dates is not None or positions is not None:
             raise ValueError("Please provide `--excel` argument when using `--date` or `--pos`.")
+        excel_data = None
 
     else:
-        if args.directories_list is not None:  # TODO: extend in the future
-            raise ValueError("Cannot specify multiple dates with `--directories_list`. "
-                             "Please provide only one date or use `--dir` with a single date.")
-
         if dates is None or positions is None:
             raise ValueError("Please provide both `--date` and `--pos` arguments when using `--excel`.")
 
+        if args.directories_list is not None:  # TODO: extend in the future
+            raise ValueError("Cannot specify dates with `--directories_list`. "
+                             "Please use `--dir` with a multiple dates.")
+
         for i in range(len(dates)):
-            dates[i] = dates[i].replace("-", "_")
+            dates[i] = pd.to_datetime(dates[i].replace("-", "_"), format="%Y_%m_%d")
 
         if len(dates) == 1:
             dates = dates * len(positions)  # repeat date for each pos
@@ -266,7 +251,13 @@ def main():
             raise ValueError("Number of dates and positions must match. "
                              "Please provide the same number of dates and positions.")
 
-        logger.info(f"Processing dates: {', '.join([f'{d} pos{p}' for d, p in zip(dates, positions)])}.")
+        dir_roots = dir_roots * len(dates)
+
+        logger.info(f"Loading Excel data from file '{path_excel}'...")
+        excel_data = read_excel(path_excel)
+
+        logger.info(
+                f"""Processing dates: {" | ".join([f"{d.strftime('%Y_%m_%d')} , View{p}" for d, p in zip(dates, positions)])}.""")
 
     # %% Labeled
     if args.labeled and args.unlabeled:
@@ -286,14 +277,14 @@ def main():
     # %% Import all other files only AFTER updating `__cfg__` values
     from utils_data_manager import DataManager
 
-    for dir_root in dir_roots:
+    for dir_root, date, pos in zip(dir_roots, dates, positions):
         dm = DataManager(
                 dir_root=dir_root.strip(),
                 labeled=labeled,
                 sample_size=sample_size,
-                path_excel=path_excel,
-                date=dates,
-                pos=positions,
+                excel_data=excel_data,
+                date=date,
+                pos=pos,
                 random_forest_pixel_classifier=None,
         )
 
