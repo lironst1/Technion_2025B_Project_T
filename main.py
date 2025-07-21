@@ -224,13 +224,15 @@ def main():
 
     # %% excel
     path_excel = args.excel
-    dates = list(args.date)
-    positions = list(args.pos)
+    dates = list(args.date) if args.date is not None else None
+    positions = list(args.pos) if args.pos is not None else None
 
     if path_excel is None:
         if dates is not None or positions is not None:
             raise ValueError("Please provide `--excel` argument when using `--date` or `--pos`.")
         excel_data = None
+        dates = [None] * len(dir_roots)
+        positions = [None] * len(dir_roots)
 
     else:
         if dates is None or positions is None:
