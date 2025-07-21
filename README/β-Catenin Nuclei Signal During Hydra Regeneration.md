@@ -44,10 +44,22 @@ In the past, there used to be multiple models you could choose between, but toda
 To run the model, click the `Segmentaion -> run CPSAM` button.
 
 ## Code
-Install the required dependencies:
-```bash
-pip install -r requirements.txt
-```
+
+I'm using Python version 3.10.13. Create a new virtual environment:\
+`python -m venv "liron_project"`
+Activate the virtual environment:\
+`source "myvenv/bin/activate"` (Linux/Mac)\
+`"myvenv\Scripts\activate.bat"` (Windows)
+Or, if using Anaconda:\
+`conda create -y --name liron_project python=3.10.13`\
+
+Install the required dependencies:\
+`python -m pip install python==3.10.13`\
+`python -m pip install -r requirements.txt -U --progress-bar on`
+
+To clear the cache, run:\
+`conda clean --all -y`\
+`pip cache purge`
 
 ## Usage
 
