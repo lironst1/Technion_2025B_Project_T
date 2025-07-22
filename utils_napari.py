@@ -107,7 +107,8 @@ def open_gui_for_segmentation(dir_root, basenames, images, labels, masks):
 
     # %% Add labels layer
     colormap = napari.utils.CyclicLabelColormap(np.vstack([[0, 0, 0], CMAP.rgb.colors]))
-    layer_labels = viewer.add_labels(np.copy(labels), name="Labels", colormap=colormap)
+    layer_labels = viewer.add_labels(np.copy(masks), name="Labels",
+            colormap=colormap)  # add masks as labels for faster segmentation
     layer_labels.editable = True
     layer_labels.brush_size = 10
     layer_labels.mode = "paint"
@@ -123,9 +124,9 @@ def open_gui_for_segmentation(dir_root, basenames, images, labels, masks):
 
     layer_labels.events.selected_label.connect(cyclic_label)
 
-    # %% Add masks layer
-    layer_masks = viewer.add_labels(np.copy(masks), name="Cellpose Masks", colormap=colormap)
-    layer_masks.editable = False
+    # # %% Add masks layer
+    # layer_masks = viewer.add_labels(np.copy(masks), name="Cellpose Masks", colormap=colormap)
+    # layer_masks.editable = False
 
     # %% Filename layer (show filename both in the status bar and as an overlay on the image)
     viewer.status = f"Filename: {basenames[viewer.dims.current_step[0]]}"  # Initialize status bar

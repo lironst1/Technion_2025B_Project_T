@@ -420,13 +420,14 @@ def get_image_paths(dir_root: str,
     else:
         if sample_size is True:
             sample_size = len(image_paths)
-        elif isinstance(sample_size, float) and 0 < sample_size <= 1:
+        elif isinstance(sample_size, float) and 0 < sample_size < 1:
             sample_size = int(sample_size * len(image_paths))
-        elif isinstance(sample_size, int):
+        elif int(sample_size) == sample_size:
+            sample_size = int(sample_size)
             if sample_size > len(image_paths):
                 raise ValueError(f"Requested sample size {sample_size} exceeds total images {len(image_paths)}.")
         else:
-            raise ValueError(f"Invalid sample_size: {sample_size}")
+            raise ValueError(f"Invalid sample_size: {sample_size}. Must be a float in (0, 1] or an integer.")
         image_paths = random.sample(image_paths, k=sample_size)
 
     # Collect metadata

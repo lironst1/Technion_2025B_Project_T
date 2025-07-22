@@ -74,7 +74,7 @@ def parse_args():
             "--excel",
             type=str,
             help=f"Path to an Excel file with experiment data. "
-                 f"If provided, the script will read the following columns: {__cfg__.EXCEL_COLUMNS.keys()}. "
+                 f"If provided, the script will read the following columns: {list(__cfg__.EXCEL_COLUMNS.keys())}. "
                  f"If `--date` and `--pos` are provided, the script will only process data in `--dir` based on these "
                  f"values. Otherwise, it will process all data in `--dir` (which should also appear in `--excel`).",
     )
@@ -95,6 +95,12 @@ def parse_args():
                  f"If provided, the script will filter the data in `--excel` based on these positions. "
                  f"Multiple positions can be provided as a comma-separated list '1,2,3'. "
                  f"Note that this will only work if `--excel` and `--date` are provided.",
+    )
+
+    parser.add_argument(
+            "--view",
+            type=to_tuple_int,
+            help=f"An alias for `--pos`.",
     )
 
     parser.add_argument(
@@ -225,6 +231,10 @@ def main():
     # %% excel
     path_excel = args.excel
     dates = list(args.date) if args.date is not None else None
+    if args.pos is not None and args.view is not None:
+        raise ValueError("Cannot specify both `--pos` and `--view`. Please provide only one of these arguments.")
+    elif args.view is not None:
+        args.pos = args.view
     positions = list(args.pos) if args.pos is not None else None
 
     if path_excel is None:
