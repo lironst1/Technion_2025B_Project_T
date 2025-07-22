@@ -4,7 +4,11 @@ July, 2025. Liron Stettiner. lironst1@gmail.com.
 
 - [Introduction](#Introduction)
 - [Cellpose](#Cellpose)
+- [Napari](#Napari)
 - [Code](#Code)
+- [Usage](#Usage)
+- [Files](#Files)
+- [Output](#Output)
 
 ## Introduction
 
@@ -39,48 +43,125 @@ python -m cellpose
 ![[Pasted image 20250705122447.png]]
 To load an image, click `Ctrl+L` or go to `File -> Load Image`.
 You can change the parameters under the `Segmentaion -> additional settings` section and the
-`Image filtering -> cusom filter settings` section. Importantly, make sure to set the average cell diameter (in pixels).
+`Image filtering -> custom filter settings` section. Importantly, make sure to set the average cell diameter (in
+pixels).
 In the past, there used to be multiple models you could choose between, but today there is only one available.
 To run the model, click the `Segmentaion -> run CPSAM` button.
 
+## Napari
+
+Napari is an interactive Python viewer for multi-dimensional images. We will use napari for manual image segmentation (
+see the `segment_manually` flag below).
+To open napari (independently of this project), simply run:
+
+```bash
+napari
+```
+
+![[Pasted image 20250722130845.png]]
+
 ## Code
 
-I'm using Python version 3.10.13. Create a new virtual environment:\
-`python -m venv "liron_project"`
-Activate the virtual environment:\
-`source "myvenv/bin/activate"` (Linux/Mac)\
-`"myvenv\Scripts\activate.bat"` (Windows)
-Or, if using Anaconda:\
-`conda create -y --name liron_project python=3.10.13`\
+I'm using Python version 3.11.9. Create a new virtual environment:
 
-Install the required dependencies:\
-`python -m pip install python==3.10.13`\
-`python -m pip install -r requirements.txt -U --progress-bar on`
+```bash
+python -m venv "liron_project"
+```
 
-To clear the cache, run:\
-`conda clean --all -y`\
-`pip cache purge`
+Activate the virtual environment:
+
+```bash
+source "myvenv/bin/activate"  # (Linux/Mac)
+```
+
+```powershell
+& "myvenv\Scripts\activate.bat"  # (Windows PowerShell)
+```
+
+Or, if using Anaconda:
+
+```bash
+conda create -y --name liron_project python=3.10.13
+conda activate liron_project
+```
+
+Install the required dependencies:
+
+```bash
+python -m pip install python==3.11.9
+python -m pip install -r requirements.txt -U --progress-bar on
+```
+
+To clear the cache, run:
+
+```bash
+conda clean --all -y
+pip cache purge
+```
 
 ## Usage
 
+To run the full code (cellpose segmentation and plots), run:
+
+```bash
+python main.py --dir DIR [--excel EXCEL] [--date DATE] [--pos POS]
+```
+
+For example, the following command will run the full code (segmentation and plotting) twice on experiments 2025-02-27 (
+pos 1) and 2025-03-05 (pos 1). The Excel file helps identify the experiment, its time interval, the first and final
+frames of β-catenin and plot the observed intensity (on a scale of {0,1,2,3} corresponding to {'none', 'low', 'mid', '
+high'}):
+
+```bash
+python main.py --dir "path/to/all/data" --excel "betacatenin_head.xlsx" --date "2025-02-27,2025-03-05" --pos "1,1"
+```
+
+The code assumes the parent directory contains `2025_02_27/View1` and `2025_03_05/View1` inside, and the outputs will be
+written into `2025_02_27/View1/output` and `2025_03_05/View1/output` accordingly.
+
+To open napari for manual segmentation, run:
+
+```bash
+python main.py --dir DIR --segment_manually
+```
+
 ## Files
 
-| File Name                                                                                               | Description                                                        |
-| ------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------ |
-| `__init__.py`                                                                                           | The module initialization script.                                  |
-| `__cfg__.py`                                                                                            | A configuration file for all user-defined settings and parameters. |
-| `main.py`                                                                                               | The main Python script to be called.                               |
-| `utils.py`, `utils_data_manager.py`, `utils_ilastik.py`, `utils_napari.py`, `utils_pixel_classifier.py` | Python libraries with general utilities.                           |
-| `tests.py`                                                                                              | A few test functions used to check validity of inputs.             |
+| File Name                                                                                                       | Description                                                                                                  |
+|-----------------------------------------------------------------------------------------------------------------|--------------------------------------------------------------------------------------------------------------|
+| `__init__.py`                                                                                                   | The module initialization script.                                                                            |
+| `__cfg__.py`                                                                                                    | A configuration file for all user-defined settings and parameters.                                           |
+| `main.py`                                                                                                       | The main Python script to be called.                                                                         |
+| **`main.ps1`**                                                                                                  | A PowerShell script that calls `main.py` (easier to use than calling `main.py` from the terminal each time). |
+| `utils.py`<br>`utils_data_manager.py`<br>`utils_ilastik.py`<br>`utils_napari.py`<br>`utils_pixel_classifier.py` | Python libraries with general utilities.                                                                     |
+| `tests.py`                                                                                                      | A few test functions used to check validity of inputs.                                                       |
 To run the code, open Terminal and run:
 ```bash
 python main.py [...]
 ```
 
+* Alternatively, run `main.ps1` from PowerShell.
+* If one wishes to debug the code or have more flexibility, it is better to create a new python script. Here is an
+  example:
+
+```python
+from utils_data_manager import DataManager
+
+DIR = "path/to/all/data"
+EXCEL = "betacatenin_head.xlsx"
+DATE = "2025_03_05"
+POS = 1
+
+dm = DataManager(dir_root=DIR,
+        excel_data=EXCEL,
+        date=DATE,
+        pos=POS,
+)
+```
+
 When calling with the `--help` flag, the output will be:
 ```bash
-usage: main.py [-h] [-d DIR] [-p] [-dl DIRECTORIES_LIST] [-o OUTPUT] [-e EXCEL] [--date DATE] [--pos POS] [--sample_size SAMPLE_SIZE] [--labeled] [--unlabeled] [--no_cpsam_mask] [--no_plot]
-               [--plot_only_stats] [--segment_manually] [-v] [--debug]
+usage: main.py [-h] [-d DIR] [-p] [-dl DIRECTORIES_LIST] [-o OUTPUT] [-e EXCEL] [--date DATE] [--pos POS] [--view VIEW] [--sample_size SAMPLE_SIZE] [--labeled] [--unlabeled] [--no_cpsam_mask] [--no_plot] [--plot_only_stats] [--segment_manually] [-v] [--debug]
 
 options:
 
@@ -93,16 +174,15 @@ options:
   -dl DIRECTORIES_LIST, --directories_list DIRECTORIES_LIST
                         A .txt file with a list of directories to process. All frames in each directory will be processed.
                         
-  -o OUTPUT, --output OUTPUT
-                        Path to the output directory where results will be saved. If not specified, outputs will be saved in a subdirectory named 'output' in the current directory. If output directory already exists, the script will read existing values from it for processing (if they exist). If directories_list is provided, this output directory will be the base directory for each subdirectory in the list.
-                        
   -e EXCEL, --excel EXCEL
-                        Path to an Excel file with experiment data. If provided, the script will read the following columns: dict_keys(['date', 'pos', 'time_after_cut', 'time_interval', 'main_orientation', 'initial_frame_beta_catenin', 'final_frame_beta_catenin', 'beta_catenin_intensity']). If `--date` and `--pos` are provided, the script will only process data in `--dir` based on these values. Otherwise, it will process all data in `--dir` (which should also appear in `--excel`).
+                        Path to an Excel file with experiment data. If provided, the script will read the following columns: ['date', 'pos', 'time_after_cut', 'time_interval', 'main_orientation', 'initial_frame_beta_catenin', 'final_frame_beta_catenin', 'beta_catenin_intensity']. If `--date` and `--pos` are provided, the script will only process data in `--dir` based on these values. Otherwise, it will process all data in `--dir` (which should also appear in `--excel`).
                         
   --date DATE           Date of the experiment in the format 'YYYY-MM-DD'. If provided, the script will filter the data in `--excel` based on this date. Multiple dates can be provided as a comma-separated list 'YYYY-MM-DD,YYYY-MM-DD'. Note that this will only work if `--excel` and `--pos` are provided.
   
   --pos POS             View of the experiment, given as an integer. If provided, the script will filter the data in `--excel` based on these positions. Multiple positions can be provided as a comma-separated list '1,2,3'. Note that this will only work if `--excel` and `--date` are provided.
-  
+
+  --view VIEW           An alias for `--pos`
+
   --sample_size SAMPLE_SIZE
                         Number of images to randomly sample from the directory.If given in the range (0, 1], it is interpreted as a fraction (True is the same as 1, i.e., use all data in random order. False will use all data in the order discovered by os.path.walk). If None, all images are used.
                         
@@ -122,14 +202,9 @@ options:
   
   --debug               Enable debug mode. If set, debug messages will be printed to the logger and console, and seed will be set to a fixed value for reproducibility.
 ```
-
-For example, the following command will run the full code (segmentation and plotting) twice on experiments 2025-02-27 (pos 1) and 2025-03-05 (pos 1). The Excel file help identify the experiment, its time interval, the first and final frames of β-catenin and plot the observed intensity (on a scale of {0,1,2,3} corresponding to {'none', 'low', 'mid', 'high'}):
-```bash
-python main.py --dir "path/to/all/data" --excel "betacatenin_head.xlsx" --date "2025-02-27,2025-03-05" --pos "1,1"
-```
-The code assumes the parent directory contains `2025_02_27/View1` and `2025_03_05/View1` inside, and the outputs will be written into `2025_02_27/View1/output` and `2025_03_05/View1/output` accordingly.
 ## Output
-```bash
+
+```
 └── <date>
     └── <pos>
 		├── image_1.tif (orignal images, could also be links image_1.tif.lnk)
