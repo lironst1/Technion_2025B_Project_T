@@ -170,7 +170,7 @@ class ExcelData:
 
 
 def flatten_image_tree(dir_root, dir_target=None, path_excel=None, date=None, pos=None, sep="__", overwrite=False,
-        symlink=True):
+        symlink=True, ignore_dirs=False):  # todo: use get_image_paths()
     """
     Move images from a directory tree to a single directory and rename them accordingly.
 
@@ -228,62 +228,72 @@ def flatten_image_tree(dir_root, dir_target=None, path_excel=None, date=None, po
 
     excel_data = read_excel(path_excel) if path_excel is not None else None
 
+    logger.info(f"Flattening image tree from '{dir_root}' to '{dir_target}'...")
+
     os.makedirs(dir_target, exist_ok=True)
 
-    n_files = 0
-    for dir_cur, _, filenames in tqdm(os.walk(dir_root, topdown=False),
-            **get_tqdm_kw(desc="Copying files", unit="files")):
+    hbar = tqdm(**get_tqdm_kw(desc="Copying files", unit="files"))
+    for dir_cur, dirs, filenames in os.walk(dir_root):
+        if ignore_dirs:
+            dirs[:] = [d for d in dirs if d not in IGNORED_DIRS]
         filenames = natsorted([f for f in filenames if is_image(f)])
         if len(filenames) == 0:
             continue
 
         rel_path = os.path.relpath(dir_cur, dir_root)
+        if rel_path == ".":
+            rel_path = ""
 
-        dir_cur_list = rel_path.split(os.sep)  # e.g., ['2025_01_29', 'View1', 'Max_C1']
-        if len(dir_cur_list) < 2:
-            continue  # should have ./<date>/<View#>
+        if date is not None or pos is not None:
+            dir_cur_list = rel_path.split(os.sep)  # e.g., ['2025_01_29', 'View1', 'Max_C1']
+            if len(dir_cur_list) < 2:
+                continue  # should have ./<date>/<View#>
 
-        dir_cur_data_date = pd.to_datetime(dir_cur_list[0], format="%Y_%m_%d")
-        dir_cur_data_pos = int(dir_cur_list[1].lower().replace("view", "").replace("pos", ""))
+            if date is not None:  # Filter based on date
+                dir_cur_data_date = pd.to_datetime(dir_cur_list[0], format="%Y_%m_%d")
+                if isinstance(date, str):
+                    date = pd.to_datetime(date, format="%Y_%m_%d")
+                if dir_cur_data_date != date:
+                    continue
 
-        if date is not None:  # Filter based on date
-            if isinstance(date, str):
-                date = pd.to_datetime(date, format="%Y_%m_%d")
-            if dir_cur_data_date != date:
-                continue
+            if pos is not None:  # Filter based on position
+                dir_cur_data_pos = int(dir_cur_list[1].lower().replace("view", "").replace("pos", ""))
+                if isinstance(pos, str):
+                    pos = int(pos.lower().replace("view", "").replace("pos", ""))
+                if dir_cur_data_pos != pos:
+                    continue
 
-        if pos is not None:  # Filter based on position
-            if isinstance(pos, str):
-                pos = int(pos.lower().replace("view", "").replace("pos", ""))
-            if dir_cur_data_pos != pos:
-                continue
+            if excel_data is not None:  # Filter based on Excel data
+                if date is None or pos is None:
+                    raise ValueError("When providing `path_excel`, both `date` and `pos` must be specified.")
 
-        if excel_data is not None:  # Filter based on Excel data
-            # Check if the current date and pos match any rows in the Excel data
-            matching_rows = excel_data[excel_data[EXCEL_COLUMNS.date] == dir_cur_data_date]
-            if matching_rows.empty:
-                logger.warning(f"No matching rows found in Excel file for "
-                               f"date {dir_cur_data_date.strftime('%Y_%m_%d')}.")
-                continue
+                # Check if the current date and pos match any rows in the Excel data
+                matching_rows = excel_data[excel_data[EXCEL_COLUMNS.date] == dir_cur_data_date]
+                if matching_rows.empty:
+                    logger.warning(f"No matching rows found in Excel file for "
+                                   f"date {dir_cur_data_date.strftime('%Y_%m_%d')}.")
+                    continue
 
-            matching_rows = matching_rows[matching_rows[EXCEL_COLUMNS.pos] == dir_cur_data_pos]
-            if matching_rows.empty:
-                logger.warning(f"No matching rows found in Excel file for "
-                               f"date {dir_cur_data_date.strftime('%Y_%m_%d')} and pos {dir_cur_data_pos}.")
-                continue
+                matching_rows = matching_rows[matching_rows[EXCEL_COLUMNS.pos] == dir_cur_data_pos]
+                if matching_rows.empty:
+                    logger.warning(f"No matching rows found in Excel file for "
+                                   f"date {dir_cur_data_date.strftime('%Y_%m_%d')} and pos {dir_cur_data_pos}.")
+                    continue
 
-            max_frame = int(matching_rows[EXCEL_COLUMNS.final_frame_beta_catenin].max())
-            filenames = filenames[:max_frame + 1]
+                max_frame = int(matching_rows[EXCEL_COLUMNS.final_frame_beta_catenin].max())
+                filenames = filenames[:max_frame + 1]
 
-        copy(src=[os.path.join(dir_cur, f) for f in filenames],
-                dst=[os.path.join(dir_target, f"{rel_path.replace(os.sep, sep)}__{f}")
-                    for f in filenames],  # e.g., 2025_01_29__View1__Max_C1__image1.tif,
-                overwrite=overwrite,
-                symlink=symlink)
+        src = [os.path.join(dir_cur, f) for f in filenames]
+        if rel_path == "":
+            dst = [os.path.join(dir_target, f) for f in filenames]
+        else:  # e.g., 2025_01_29__View1__Max_C1__image1.tif
+            dst = [os.path.join(dir_target, f"{rel_path.replace(os.sep, sep)}__{f}") for f in filenames]
 
-        n_files += len(filenames)
+        copy(src=src, dst=dst, overwrite=overwrite, symlink=symlink)
 
-    logger.info(f"Finished copying {n_files} file{' links' if symlink else 's'} into {dir_target}.")
+        hbar.update(len(filenames))
+
+    logger.info(f"Finished copying {hbar.last_print_n} file{' links' if symlink else 's'} into {dir_target}.")
     open_file(dir_target)  # Open the target directory in File Explorer
 
 

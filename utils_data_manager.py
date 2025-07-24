@@ -8,6 +8,7 @@ from collections import defaultdict
 from pathlib import Path
 from collections.abc import Iterable, Callable
 
+import matplotlib.pyplot as plt
 import pandas as pd
 from tqdm import tqdm
 from natsort import natsorted
@@ -18,13 +19,13 @@ from skimage.segmentation import find_boundaries
 from scipy.spatial import distance_matrix
 from prettytable import PrettyTable
 
-from liron_utils.files import copy
+from liron_utils.files import copy, remove_file
 from liron_utils.pure_python import dict_, NamedQueue, parallel_threading, tqdm_, is_debugger
 from liron_utils.files import mkdirs
 from liron_utils import graphics as gr
 
 from __cfg__ import logger, AUTO_CONTRAST, set_props_kw_image, LABELS, CMAP, DATA_TYPES, Stats, \
-    CPSAM_EVAL_KW, CPSAMEvalOut, get_tqdm_kw, CACHE_SIZE, DIR_OUTPUT, DEBUG
+    CPSAM_EVAL_KW, CPSAMEvalOut, get_tqdm_kw, CACHE_SIZE, DEBUG
 from utils import imread, imwrite, pickle_load, pickle_dump, ExcelData, get_image_paths, TimeVector
 from utils_pixel_classifier import RandomForestPixelClassifier
 from utils_napari import open_gui_for_segmentation
@@ -111,8 +112,7 @@ class DataManager:
         return self.num_samples
 
     def __repr__(self):
-        return (f"DataManager(#samples={self.num_samples}, "
-                f"dir_root={self.dir_root})")
+        return f"DataManager(#samples={self.num_samples}, dir_root={self.dir_root})"
 
     def __getitem__(self, idx):
         """Get the image and associated data for a given index."""
@@ -141,7 +141,8 @@ class DataManager:
             data = dict_(basename=basename)
 
             for data_type in DATA_TYPES:
-                data[data_type] = self.get_data(idx=idx, data_type=data_type)
+                if data_type.return_to_user:
+                    data[data_type] = self.get_data(idx=idx, data_type=data_type)
 
             # Add to cache
             self.cache.enqueue(name=basename, item=data)
@@ -356,9 +357,6 @@ class DataManager:
             cpsam_out = pickle_load(os.path.join(self.dir_root, self.paths[basename].cpsam_out))
             return CPSAMEvalOut(**vars(cpsam_out))  # In case the CPSAMEvalOut class has been modified
 
-        elif data_type == "figs":
-            return None
-
         else:  # Unreachable because tests.data_type_valid(data_type) checks for valid data types
             raise ValueError
 
@@ -417,11 +415,6 @@ class DataManager:
 
         logger.info(f"Images copied to {dir_target}.")
 
-    @_iterable_idx()
-    def get_dir_out(self, idx=None, data_type=None):
-        basename = self.basenames[idx]
-        os.path.join(self.dir_root, self.paths[basename][data_type])
-
     @_iterable_idx(tqdm_kw=dict(desc="Saving images", unit="image"))
     def _save_images(self, idx=None, dir_target=None):
         """
@@ -463,7 +456,8 @@ class DataManager:
     def pixel_classifier_save(self, filename=None):
         """Save the pixel classifier to a file."""
         if filename is None:
-            filename = os.path.join(self.dir_root, DIR_OUTPUT, "pixel_classifier.pkl")
+            filename = os.path.join(self.dir_root, DATA_TYPES.pixel_classifier.dirname,
+                    DATA_TYPES.pixel_classifier.filename + DATA_TYPES.pixel_classifier.ext)
         return self.pixel_classifier.save_model(filename=filename)
 
     @_iterable_idx(tqdm_kw=dict(desc="Predicting probabilities", unit="image"))
@@ -657,9 +651,9 @@ class DataManager:
             - "mask_bounds": Cellpose model cell mask boundaries
             - "stats": experiment statistics (see `plot_stats`) with vertical line at the current image index (time)
             Predefined options are:
-            - "default": ["image+mask_bounds", "mask+pred", "stats"]
+            - "default": ["image+mask_bounds", "mask", "stats"]
 
-            For example, if `which=["image", "image+mask_bounds", "prob", "mask+pred", "stats"]`,
+            For example, if `which=["image", "image+cpsam_mask_bounds", "rfpc_prob", "cpsam_mask+rfpc_pred", "stats"]`,
             then len(which)==5 and the shape will be:
                 1       2       3               4
             1	+---------------+---------------+---------------+
@@ -701,19 +695,21 @@ class DataManager:
         if "alpha" in imshow_kw:
             raise ValueError("`alpha` keyword argument is not supported. Define `alpha` in the __cfg__ file instead.")
 
+        # Which plots to create
         WHICH_VALUES = {
             "image",
-            # Random Forest Pixel Classifier
-            "prob",
-            "pred",
-            # Cellpose
-            "mask",
-            "mask_bounds",
+            # Random Forest Pixel Classifier (RFPC)
+            "rfpc_prob",
+            "rfpc_pred",
+            # Cellpose (CPSAM)
+            "cpsam_mask",
+            "cpsam_mask_bounds",
+            "cpsam_prob",
             # Etc.
             "stats",
         }
         WHICH_PREDEFINED = dict(
-                default=[["image", "mask_bounds"], ["mask", "pred"], ["stats"]],
+                default=[["image", "cpsam_mask_bounds"], ["cpsam_prob"], ["stats"]],
         )
 
         if isinstance(which, str) and which in WHICH_PREDEFINED:
@@ -728,46 +724,48 @@ class DataManager:
 
             def parse_which_str(which: str):
                 """Parse a string of the form "<plot1>+<plot2>+..." into a list of strings."""
-                which = which.replace(" ", "")
+                which = which.lower().replace(" ", "")
 
                 if which in WHICH_VALUES:
                     which = [which]
                 else:
                     which = which.split("+")
                     if not set(which) <= WHICH_VALUES:
-                        raise ValueError(
-                                f"Invalid `which` value '{which}'. Valid values are: {', '.join(WHICH_VALUES)}.")
+                        raise ValueError(f"Invalid `which` value '{which}'. "
+                                         f"Valid values are: {', '.join(WHICH_VALUES)}.")
 
-                return which
+                return [w.strip() for w in which]  # todo: check
 
             which = [parse_which_str(w) for w in which]
 
-        if len(which) == 0:
-            raise ValueError("`which` must contain at least one plot type.")
-        elif len(which) in [1, 2]:
-            shape = (1, len(which))
-            # +---------------+---------------+
-            # │               │               │
-            # │      <1>      +      <2>      +
-            # │               │               │
-            # +---------------+---------------+
-            grid_layout = None
-        else:  # len(which) > 3
-            shape = (2, 2 + len(which) // 2)
-            # +---------------+---------------+---------------+
-            # │               │      <2>      │      <4>      │
-            # │      <1>      +---------------+---------------+
-            # │               │      <3>      │      <5>      │
-            # +---------------+---------------+---------------+
-            grid_layout = [[(0, 2), (0, 2)]]
-
-        axes_kw = dict(
-                shape=shape,
-                figsize=(15, 11),
-                grid_layout=grid_layout,
-        )
-
+        # Get axes
         if axs is None:  # create new axes
+            # Get axes shape and layout
+            if len(which) == 0:
+                raise ValueError("`which` must contain at least one plot type.")
+            elif len(which) in [1, 2]:
+                shape = (1, len(which))
+                # +---------------+---------------+
+                # │               │               │
+                # │      <1>      +      <2>      +
+                # │               │               │
+                # +---------------+---------------+
+                grid_layout = None
+            else:  # len(which) > 3
+                shape = (2, 2 + len(which) // 2)
+                # +---------------+---------------+---------------+
+                # │               │      <2>      │      <4>      │
+                # │      <1>      +---------------+---------------+
+                # │               │      <3>      │      <5>      │
+                # +---------------+---------------+---------------+
+                grid_layout = [[(0, 2), (0, 2)]]
+
+            axes_kw = dict(
+                    shape=shape,
+                    figsize=(15, 11),
+                    grid_layout=grid_layout,
+            )
+
             axs = gr.Axes(**axes_kw).axs
             axs = axs[axs != 0]
         elif isinstance(axs, gr.Axes):
@@ -776,33 +774,32 @@ class DataManager:
             raise TypeError(f"`axs` must be an Axes object or a list of Axes objects (given {type(axs)} instead).")
         axs_iter = iter(axs)
 
-        # Load data
+        # %% Load data
         image = self.get_data(idx=idx, data_type="image")
 
         prob = None
-        if any(["prob" in w or "pred" in w for w in which]):
+        if any([{"rfpc_prob", "rfpc_pred"} and set(w) for w in which]):
             prob = self.get_data(idx=idx, data_type="prob")
 
-        mask = None
-        if any(["mask" in w or "mask_bounds" in w for w in which]):
+        cpsam_out = None
+        if any([{"cpsam_mask", "cpsam_mask_bounds", "cpsam_prob"} and set(w) for w in which]):
             cpsam_out: CPSAMEvalOut = self.get_data(idx=idx, data_type="cpsam_out")
-            if cpsam_out is not None:
-                mask = cpsam_out.mask
 
-        # Plot data
+        # %% Plotting Functions
         def plot_image(ax, image, cmap="gray", **imshow_kw):
             if len(ax.images) == 0:
                 ax.imshow(image, cmap=cmap, **imshow_kw)
             else:
                 ax.images[0].set_data(image)
 
-        def plot_probabilities(ax, prob, cmap, **imshow_kw):
-            prob_color = np.einsum("...i,ij->...j", prob, np.array(cmap.colors))
+        def plot_probabilities(ax, prob, cmap=None, **imshow_kw):
+            if prob.ndim == 3:
+                prob = np.einsum("...i,ij->...j", prob, np.array(cmap.colors))
 
             if len(ax.images) < 2:
-                ax.imshow(prob_color, cmap=cmap, **imshow_kw)
+                ax.imshow(prob, cmap=cmap, **imshow_kw)
             else:
-                ax.images[-1].set_data(prob_color)
+                ax.images[-1].set_data(prob)
 
         def plot_predictions(ax, prob, cmap, **imshow_kw):
             pred = np.argmax(prob, axis=-1) + 1  # (0=unlabeled, 1=label1, 2=label2, ...)
@@ -820,25 +817,26 @@ class DataManager:
             else:
                 ax.images[-1].set_data(mask)
 
+        # %% Plot
         for i, w in enumerate(which):
             ax = next(axs_iter)
             ax.set_title(" + ".join(w))
 
-            cmap_prob = CMAP.rgb
-            cmap_mask = CMAP.rgb_mask
+            cmap_rfpc_prob = CMAP.rgb
+            cmap_cpsam_mask = CMAP.rgb_cpsam_mask
             if len(w) > 1:
-                cmap_prob = CMAP.rgba
-                cmap_mask = CMAP.rgba_mask
+                cmap_rfpc_prob = CMAP.rgba
+                cmap_cpsam_mask = CMAP.rgba_cpsam_mask
 
             for plot in w:
                 if plot == "image":
                     plot_image(ax, image, **imshow_kw)
-                elif plot == "prob":
+                elif plot == "rfpc_prob":
                     if prob is not None:
-                        plot_probabilities(ax, prob, cmap=cmap_prob, **imshow_kw)
-                elif plot == "pred":
+                        plot_probabilities(ax, prob, cmap=cmap_rfpc_prob, **imshow_kw)
+                elif plot == "rfpc_pred":
                     if prob is not None:
-                        plot_predictions(ax, prob, cmap=cmap_prob, **imshow_kw)
+                        plot_predictions(ax, prob, cmap=cmap_rfpc_prob, **imshow_kw)
                         # if ax.child_axes:  # colorbar exists
                         # 	pass
                         # else:  # add colorbar
@@ -850,13 +848,28 @@ class DataManager:
                         # 			labels=[f"{label_idx}: {label}" for (label, label_idx) in LABELS2IDX.items()],
                         # 			fontsize=7, rotation=0, color="white")  # tick labels
                         pass
-                elif plot == "mask":
-                    if mask is not None:
-                        plot_mask(ax, mask, cmap=cmap_mask, **imshow_kw)
-                elif plot == "mask_bounds":
-                    if mask is not None:
+                elif plot == "cpsam_mask":
+                    if cpsam_out is not None:
+                        mask = cpsam_out.mask
+                        plot_mask(ax, mask, cmap=cmap_cpsam_mask, **imshow_kw)
+                elif plot == "cpsam_mask_bounds":
+                    if cpsam_out is not None:
+                        mask = cpsam_out.mask
                         mask_bounds = find_boundaries(mask, mode='outer')
-                        plot_mask(ax, mask_bounds, cmap=cmap_mask, **imshow_kw)
+                        plot_mask(ax, mask_bounds, cmap=cmap_cpsam_mask, **imshow_kw)
+                elif plot == "cpsam_prob":
+                    if cpsam_out is not None:
+                        cpsam_prob = cpsam_out.flow[2]
+                        plot_probabilities(ax, cpsam_prob, **imshow_kw)
+
+                        if ax.child_axes:  # colorbar exists
+                            pass
+                        else:  # add colorbar
+                            cax = ax.inset_axes(bounds=(0.01, 0.01, 0.03, 0.2))
+                            cax.grid(False)
+                            cbar = ax.figure.colorbar(mappable=ax.images[-1], cax=cax, orientation="vertical")
+                            cax.tick_params(axis="y", direction="in", color="none", pad=2,  # ticks
+                                    labelsize=7, rotation=0, labelcolor="white")  # tick labels
                 elif plot == "stats":
                     self.plot_stats(idx_line=idx, ax=ax, save_fig=False, **set_props_kw)
                     axs[i] = None
@@ -926,19 +939,32 @@ class DataManager:
 
     @functools.cached_property
     def stats(self):
-        filename = os.path.join(self.dir_root, DIR_OUTPUT, "stats.pkl")
+        filename = os.path.join(self.dir_root, DATA_TYPES.stats.dirname,
+                DATA_TYPES.stats.filename + DATA_TYPES.stats.ext)
         if os.path.exists(filename):
             logger.info(f"Loading statistics from {filename}...")
             stats = pickle_load(filename)
             try:
                 stats = Stats(**vars(stats))  # In case the Stats class has been modified
-                logger.info("Statistics loaded.")
-                return stats
             except TypeError as e:
                 logger.warning(f"Error loading statistics: {e}. Recalculating statistics.")
 
-        # if not all(self.has_data(data_type="mask")):
-        # 	raise ValueError("Not all images have masks. Run `cpsam_mask()` on all images first.")
+            if any(stats.count):
+                return stats
+
+            else:
+                logger.warning("No nuclei detected in any image of loaded statistics. "
+                               "File will be removed.")
+                try:
+                    os.remove(filename)
+                except OSError:
+                    logger.warning(f"Could not remove statistics file {filename}. "
+                                   f"You can safely remove it manually.")
+
+        if not all(self.has_data(data_type="cpsam_out")):
+            logger.warning(f"Not all images have masks. "
+                           f"Consider running `cpsam_mask()` on all images first. "
+                           f"Statistics will be calculated only for images with masks.")
         idx_cpsam_out = np.argwhere(self.has_data(data_type="cpsam_out")).flatten()
 
         # Calculate statistics
@@ -981,14 +1007,15 @@ class DataManager:
                         dist_mat = np.triu(distance_matrix(x=centroids, y=centroids), k=1)
                         stats.avg_dist[idx] = np.mean(dist_mat[dist_mat > 0])
 
-        logger.info("Finished calculating statistics.")
-
         # Save statistics to file
-        logger.info(f"Saving statistics...")
-        pickle_dump(stats, filename)
-        logger.info(f"Statistics saved to {filename}.")
-
-        return stats
+        if any(stats.count):
+            logger.info("Finished calculating statistics. Saving file...")
+            pickle_dump(stats, filename)
+            logger.info(f"Statistics saved to {filename}.")
+            return stats
+        else:
+            logger.warning("No nuclei deetected in any image. Statistics will not be saved.")
+            return None
 
     def plot_stats(self, idx_line=None, ax=None, save_fig=False, **set_props_kw):
         """
@@ -1010,6 +1037,10 @@ class DataManager:
         """
 
         # Check and parse inputs
+        if self.stats is None:
+            logger.warning("Statistics are not available. Skipping plotting.")
+            return None
+
         if save_fig:
             save_file_name = os.path.join(DATA_TYPES.figs.dirname, "stats" + DATA_TYPES.figs.ext)
 

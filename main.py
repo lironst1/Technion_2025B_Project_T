@@ -1,4 +1,4 @@
-import os
+import warnings
 import argparse
 import numpy as np
 import random
@@ -205,11 +205,13 @@ def main():
         logger.file_handler.setLevel(Logger.NAME2LEVEL.DEBUG)
         logger.console_handler.setLevel(Logger.NAME2LEVEL.DEBUG)
 
-    # %% Random seed
+    # %% Debug Mode
     if args.debug:
-        logger.info(f"Running in DEBUG mode with seed {__cfg__.SEED}.")
+        logger.info(f"Running in DEBUG mode with seed {__cfg__.SEED}. "
+                    f"Warnings will be treated as errors.")
         np.random.seed(__cfg__.SEED)
         random.seed(__cfg__.SEED)
+        warnings.filterwarnings("error")  # Treat warnings as errors for debugging
 
     # %% dir
 

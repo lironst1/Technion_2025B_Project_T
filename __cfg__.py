@@ -1,5 +1,4 @@
 import os
-import random
 import numpy as np
 import matplotlib.pyplot as plt
 from matplotlib.colors import ListedColormap
@@ -14,9 +13,10 @@ from liron_utils.pure_python import dict_
 gr.update_rcParams("liron_utils-article")
 # gr.update_rcParams("liron_utils-text_color", "white")
 gr.update_rcParams({
-    'figure.autolayout':     False,
+    'figure.autolayout': False,  # When True, automatically adjust subplot
     'figure.figsize':        [15, 8],  # figure size in inches
     'figure.dpi':            100,
+
     # The figure subplot parameters.  All dimensions are a fraction of the figure width and height.
     'figure.subplot.left':   0.05,  # the left side of the subplots of the figure
     'figure.subplot.right':  0.95,  # the right side of the subplots of the figure
@@ -52,20 +52,57 @@ DIR_OUTPUT = "output"
 class DataType:
     """Container for data type information."""
 
-    def __init__(self, dirname, ext):
+    def __init__(self, dirname: str, ext: str, filename: str = None, return_to_user: bool = True):
         self.dirname = dirname  # Directory name relative to the root directory
+
+        if not ext.startswith("."):
+            ext = "." + ext
         self.ext = ext  # File extension
+
+        if filename is not None:
+            self.filename = filename
+
+        self.return_to_user = return_to_user
 
     def __repr__(self):
         return f"DataType(" + f", ".join(f"{name}={getattr(self, name)}" for name in vars(self).keys()) + ")"
 
 
-DATA_TYPES = dict_(
-        image=DataType(dirname="", ext=".tif"),
-        labels=DataType(dirname="labels", ext=".tif"),
-        prob=DataType(dirname=os.path.join(DIR_OUTPUT, "random_forest_prob"), ext=".pkl"),
-        cpsam_out=DataType(dirname=os.path.join(DIR_OUTPUT, "cpsam_out"), ext=".pkl"),
-        figs=DataType(dirname=os.path.join(DIR_OUTPUT, "figs"), ext=f".{plt.rcParams['savefig.format']}"),
+DATA_TYPES: dict[str, DataType] = dict_(
+        # If defining new DataType with `return_to_user=True`, add it to `DataManager.get_data()` and `IGNORED_DIRS`
+        image=DataType(
+                dirname="",
+                ext="tif"
+        ),
+        labels=DataType(
+                dirname="labels",
+                ext="tif"
+        ),
+        prob=DataType(
+                dirname=os.path.join(DIR_OUTPUT, "random_forest_prob"),
+                ext="pkl"
+        ),
+        cpsam_out=DataType(
+                dirname=os.path.join(DIR_OUTPUT, "cpsam_out"),
+                ext="pkl"
+        ),
+        stats=DataType(
+                dirname=os.path.join(DIR_OUTPUT),
+                filename="stats",
+                ext="pkl",
+                return_to_user=False
+        ),
+        pixel_classifier=DataType(
+                dirname=os.path.join(DIR_OUTPUT),
+                filename="pixel_classifier",
+                ext="pkl",
+                return_to_user=False
+        ),
+        figs=DataType(
+                dirname=os.path.join(DIR_OUTPUT, "figs"),
+                ext=plt.rcParams['savefig.format'],
+                return_to_user=False
+        ),
 )
 
 IGNORED_DIRS = {DIR_OUTPUT, DATA_TYPES.labels.dirname}
@@ -158,6 +195,7 @@ LABELS = dict_(
 
 # %% Plots
 IMAGE_EXTENSIONS = {'.tif', '.tiff'}  # '.jpg', '.jpeg', '.png', '.bmp', '.gif'
+# If adding new extension, update `utils.imread()` and `utils.imwrite()`
 
 set_props_kw_image = dict(axis="image", ticks=False, xy_lines=False)
 
@@ -175,8 +213,8 @@ def get_cmap(labels=None, alpha=False):
 CMAP = dict_(
         rgb=get_cmap(),  # 1=background, 2=nuclei, 3=hydra, 4=dirt
         rgba=get_cmap(alpha=True),  # 1=background, 2=nuclei, 3=hydra, 4=dirt
-        rgb_mask=get_cmap(labels=[LABELS.background, LABELS.nuclei]),  # 0=background, 1=nuclei
-        rgba_mask=get_cmap(labels=[LABELS.background, LABELS.nuclei], alpha=True),  # 0=background, 1=nuclei
+        rgb_cpsam_mask=get_cmap(labels=[LABELS.background, LABELS.nuclei]),  # 0=background, 1=nuclei
+        rgba_cpsam_mask=get_cmap(labels=[LABELS.background, LABELS.nuclei], alpha=True),  # 0=background, 1=nuclei
 )
 
 
@@ -193,6 +231,8 @@ class Stats:
             self.sum_area_intensity = sum_area_intensity  # sum of area * intensity
             self.avg_dist = avg_dist  # average distance between nuclei
             self.intensity_excel = intensity_excel  # beta-catenin intensity from Excel
+            # todo:
+            #   - min distance between nuclei
         else:  # initialize with a specific size
             self.count = np.zeros(size, dtype="uint16")  # number of detected nuclei
             self.avg_intensity = np.full(size, np.nan)  # average intensity
@@ -203,16 +243,13 @@ class Stats:
 
 
 # %% TQDM
-TQDM_KW = dict(
-        disable=False,
-        desc="Processing",
-        delay=0.2,
-)
-
-
 def get_tqdm_kw(**tqdm_kw):
     """Return a dictionary of keyword arguments for tqdm."""
-    return TQDM_KW | tqdm_kw
+    return dict(
+            disable=False,
+            desc="Processing",
+            delay=0.2,
+    ) | tqdm_kw
 
 
 # %% Logger
